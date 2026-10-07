@@ -1,0 +1,48 @@
+# Phonecase 仓库基线 .gitignore（source-only）
+# 依据：outputs/product-material-library-phase1-20261006/environment-plan.md §4 的排除集合，
+# 外加同类新增项（根目录任务临时件、CURRENT 历史归档、checkpoint 临时目录），逐条标注来源。
+# 本文件本身**不入忽略集**（应作为 source-only 基线被跟踪）；本步只做 git init，不 stage/commit/push。
+
+# --- §4「依赖与工具」 ---
+node_modules/
+**/node_modules/
+.tools/
+website/.tools/
+
+# --- §4「留存数据 / 受保护输入」 ---
+outputs/platform-volume-census-20260922/
+outputs/tikhub-capability-verification-20260922/
+outputs/material-analysis-20-20260920/
+
+# --- §4「本任务生成物」 ---
+outputs/product-material-library-phase1-20261006/**
+
+# --- §4「第三方与历史」 ---
+website/**
+*.mp4
+*.mov
+*.png
+*.jpg
+
+# --- §4「报告」 ---
+harness-reports/**
+
+# --- §4「机密与临时」 ---
+.env
+.env.*
+*credentials*
+*.log
+
+# --- 同类新增 A：§4 未覆盖但按「本任务生成物」同类判定的根目录任务临时件 ---
+tmp-*
+
+# --- 同类新增 B：CURRENT 历史归档（§4 只点名 CURRENT.md/AGENTS.md；历史归档非 source-only） ---
+CURRENT-history-*.md
+CURRENT-history-map-*.json
+
+# --- 同类新增 C：临时工作目录与缓存（工具链产物，非源码） ---
+.tmp/
+**/.tmp/
+checkpoint-tmp/
+__pycache__/
+.pytest_cache/
