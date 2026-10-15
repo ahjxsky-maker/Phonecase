@@ -25,6 +25,9 @@ function loadStore(storePath) {
 export function startBaserowDouble({ storePath, databaseId = 1, host = '127.0.0.1', port = 0, schemaTypes = DEFAULT_TYPES, logRequests = false } = {}) {
   if (host !== '127.0.0.1') throw new Error(`baserow_double_is_loopback_only:${host}`);
   const requestLog = [];
+  // 故障注入（R9-STEP2.4）：让第 N 次之后的**行读取**失败，用于验证“写入被接受但读回失败”的诚实回执
+  let rowReadCount = 0;
+  let failRowReadsAfter = Infinity;
   const state = loadStore(storePath);
   state.database_id = Number(databaseId);
   const save = () => fs.writeFileSync(storePath, JSON.stringify(state, null, 1), 'utf8');
@@ -137,6 +140,8 @@ export function startBaserowDouble({ storePath, databaseId = 1, host = '127.0.0.
           if (!tableName) return send(404, { error: 'TABLE_DOES_NOT_EXIST' });
           const rows = (state.rows[tableId] ??= []);
           if (method === 'GET') {
+            rowReadCount++;
+            if (rowReadCount > failRowReadsAfter) return send(503, { error: 'INJECTED_READ_FAILURE', row_read: rowReadCount });
             const page = Number(u.searchParams.get('page') ?? 1);
             const size = Number(u.searchParams.get('size') ?? 100);
             const slice = rows.slice((page - 1) * size, page * size);
@@ -179,6 +184,9 @@ export function startBaserowDouble({ storePath, databaseId = 1, host = '127.0.0.
         requests: requestLog,
         /** 测试用：在替身**内存状态**上注入（直接改文件不会影响已启动的替身）。 */
         mutateState: (fn) => { fn(state); save(); return state; },
+        /** 测试用：第 N 次之后的**行读取**返回 503（验证写入被接受但读回失败时的诚实回执）。 */
+        failRowReadsAfter: (n) => { failRowReadsAfter = Number(n); rowReadCount = 0; return true; },
+        rowReadCount: () => rowReadCount,
         close: () => new Promise((r) => server.close(() => r())),
       });
     });

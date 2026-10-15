@@ -18,6 +18,7 @@
 //   node tools/material-library/cli.mjs media     [--port N] [--serve]
 // 注意（R4）：结构工作（建表/字段/视图）必须带 --database-id；导入/应用的真实命令与必需参数见 README。
 // 注意（R8）：query/edit/export/restore 只消费**已存在的目标**；只有 import/apply 会建结构。ML_TRANSPORT=baserow-double 时回执标 baserow_verified=false（回环替身，不是 Baserow）。
+// R12：baserow_verified 不再是常量 —— 真实 http 目标读取成功后才为 true（带 verification_method/at）；memory 与未打开目标的拒绝回执仍为 false。
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
@@ -47,7 +48,42 @@ function parseArgs(argv) {
   return out;
 }
 
-const argv = parseArgs(process.argv.slice(2));
+// R11：**凭据输入安全**——命令行参数会被工具/会话日志记录，因此令牌不允许走 argv。
+//   最小适配：--creds-file <JSON: base_url/database_id/db_token/jwt> 或 ML_BASE_URL/ML_DATABASE_ID/
+//   ML_DB_TOKEN/ML_MGMT_TOKEN。只填空缺项，显式参数优先；回执只写来源与「是否存在」，绝不写值。
+function applyCredentialFallbacks(a) {
+  const sources = { 'base-url': null, 'database-id': null, token: null, 'mgmt-token': null };
+  let fileCreds = null;
+  if (typeof a['creds-file'] === 'string') {
+    const p = path.isAbsolute(a['creds-file']) ? a['creds-file'] : path.resolve(a['creds-file']);
+    if (!fs.existsSync(p)) throw new Error(`creds_file_not_found:${p}`);
+    fileCreds = JSON.parse(fs.readFileSync(p, 'utf8'));
+    sources.file = 'provided';
+  }
+  const pick = (argKey, fileKey, envKey) => {
+    if (a[argKey] !== undefined) { sources[argKey] = 'argv'; return; }
+    const fromFile = fileCreds ? fileCreds[fileKey] : undefined;
+    if (fromFile !== undefined && fromFile !== null && fromFile !== '') { a[argKey] = String(fromFile); sources[argKey] = 'creds_file'; return; }
+    const fromEnv = process.env[envKey];
+    if (fromEnv !== undefined && fromEnv !== '') { a[argKey] = fromEnv; sources[argKey] = 'env'; return; }
+    sources[argKey] = null;
+  };
+  pick('base-url', 'base_url', 'ML_BASE_URL');
+  pick('database-id', 'database_id', 'ML_DATABASE_ID');
+  pick('token', 'db_token', 'ML_DB_TOKEN');
+  pick('mgmt-token', 'jwt', 'ML_MGMT_TOKEN');
+  a._credentials = {
+    sources,
+    base_url: a['base-url'] ?? null,
+    database_id: a['database-id'] ?? null,
+    db_token_present: typeof a.token === 'string' && a.token.length > 0,
+    mgmt_token_present: typeof a['mgmt-token'] === 'string' && a['mgmt-token'].length > 0,
+    note: '令牌值不进入 argv/回执；只记录来源与是否存在。',
+  };
+  return a;
+}
+
+const argv = applyCredentialFallbacks(parseArgs(process.argv.slice(2)));
 const cmd = argv._[0];
 const root = argv.root ?? DEFAULT_ROOT;
 const P = sourcePaths(root);
@@ -236,6 +272,7 @@ async function cmdImport() {
     if (!argv['base-url']) throw new Error('http target requires --base-url');
     assertLoopback(argv['base-url']);
     // F1 修复：真实写入 + 分页读回。连接成功**不**等于导入成功。
+    log(`creds: ${JSON.stringify(argv._credentials.sources)}（令牌值不回显）`);
     const client = createHttpClient({ baseUrl: argv['base-url'], token: argv.token, mgmtToken: argv['mgmt-token'] ?? null });
     const receipt = {
       adapter: ADAPTER_VERSION, mode: 'http', base_url: argv['base-url'],
@@ -245,6 +282,9 @@ async function cmdImport() {
     try {
       const ping = await client.ping();
       receipt.steps.push({ step: 'ping', ok: true, version: ping?.version ?? null });
+      // R12：ping 拿到真实 Baserow 版本 → 本次导入回执可如实标 baserow_verified=true
+      markBaserowVerified(`ping_real_baserow_version=${ping?.version ?? 'unknown'}`);
+      Object.assign(receipt, transportInfo());
 
       // 结构先就位（幂等 reconcile），再写数据行
       const schemaRes = await ensureSchemaAndViews(client, {
@@ -309,11 +349,25 @@ function selectImportInput(records, curArgv) {
 // ---------------------------------------------------------------- R8：目标打开与只读语义
 // R8-STEP2/3：**查询/编辑/导出**只消费**已存在的目标**：绝不建表/建字段/建视图、不导入、不写覆盖层。
 // 目标传输缺席时只允许用**已标注的**回环替身（ML_TRANSPORT=baserow-double），且回执必须 baserow_verified=false。
+//
+// R12 修复（原为硬编码 false，见 R11 报告的 OPEN 项）：`baserow_verified` 现在表示
+// 「**本次运行真的对真实 Baserow 传输完成过一次读取**」，而不是一个常量：
+//   - 回环形状替身（ML_TRANSPORT=baserow-double）→ 恒为 false（它不是 Baserow 实例）；
+//   - memory 目标 → false（只验证适配器语义）；
+//   - http 目标 → 读取到表/字段（或 import 的 ping 拿到版本）之后才置 true，并带 verification_method/at；
+//   - 目标打不开的“如实拒绝回执” → false（本次什么都没验证）。
+let transportVerification = { baserow_verified: false, method: null, at: null };
+/** 记录“本次运行已完成一次真实 Baserow 读取”，供随后生成的回执如实标注。 */
+function markBaserowVerified(method) {
+  transportVerification = { baserow_verified: true, method, at: new Date().toISOString() };
+}
 function transportInfo() {
   const substituted = process.env.ML_TRANSPORT === 'baserow-double';
   return {
     transport: substituted ? 'baserow_shape_double_substituted' : 'baserow_http',
-    baserow_verified: false,
+    baserow_verified: substituted ? false : transportVerification.baserow_verified,
+    verification_method: substituted ? 'substituted_loopback_double' : (transportVerification.method ?? 'not_verified_in_this_run'),
+    verification_at: substituted ? null : transportVerification.at,
     substitution_note: substituted
       ? '已用**回环 Baserow 形状替身**替代不可用的真实 Baserow 传输（严格 2.4.0 行/结构形状）；**不是** Baserow 实例，A2/A6 的真实实例部分仍为 OPEN。'
       : null,
@@ -334,7 +388,7 @@ function queryFromArgv(curArgv, prefix = '') {
 async function openExistingTarget({ requireAllTables = true } = {}) {
   const targetMode = argv.target ?? null;
   if (!targetMode) throw new Error('target_required：只读命令必须显式声明 --target http（既有目标）；不隐式新建目标');
-  const transport = transportInfo();
+  let transport = transportInfo();
   if (targetMode === 'memory') {
     // 内存目标只用于隔离测试：**空目标**，因此不建表、不导入（本命令从不改动它）
     const backend = createMemoryBackend();
@@ -365,6 +419,9 @@ async function openExistingTarget({ requireAllTables = true } = {}) {
     fieldMeta[t] = Object.fromEntries(fields.map((f) => [f.name, f]));
   }
   const backend = createHttpBackend({ client, tableIds, fieldMeta });
+  // R12：表 + 字段都真的读到了 → 本次运行确实对真实 Baserow 完成了一次读取，回执方可标 true。
+  markBaserowVerified('read_tables_and_fields_via_http_token_scope');
+  transport = transportInfo();
   return { backend, target_mode: 'http', kind: 'baserow_http', transport, table_ids: tableIds, missing_tables };
 }
 
@@ -437,30 +494,51 @@ async function cmdEdit({ opened: openedIn = null, query: queryIn = null, writeRe
     opened = openRes.opened;
   }
   const query = queryIn ?? queryFromArgv(argv, 'query-');
-  const resolved = await resolveTargetSelection({
-    backend: opened.backend, query,
-    selection: { entityKey: argv['entity-key'] ?? null, rowId: argv['row-id'] ?? null, namespace: argv['namespace'] ?? null },
-  });
+  // R9-STEP2.4：目标读写异常时给出**诚实**回执（写入/读回结果未知），不让进程崩掉、也不谎称零写入
+  let resolved = null;
+  try {
+    resolved = await resolveTargetSelection({
+      backend: opened.backend, query,
+      selection: { entityKey: argv['entity-key'] ?? null, rowId: argv['row-id'] ?? null, namespace: argv['namespace'] ?? null },
+    });
+  } catch (e) {
+    const failed = {
+      adapter: ADAPTER_VERSION, at: new Date().toISOString(), command: source,
+      target: targetDescriptor(opened), query, read_only: false,
+      mutated: null, writes_attempted: 0, writes_performed: 0, writes_confirmed: 0, uncertain_outcome: true,
+      mutation: { attempted: false, write_accepted: false, confirmed: false, readback_ok: false, state: 'unknown_read_error', error: String(e.message) },
+      problems: [`target_read_error:${String(e.message)}`], ok: false,
+      note: '读取目标失败：未尝试写入；也不声称目标未被改动。',
+    };
+    if (writeReceipt) writeJson(path.join(dir, 'edit-receipt.json'), failed);
+    log(`edit: READ-ERROR ${String(e.message)}`);
+    process.exitCode = 13;
+    return failed;
+  }
   const hasClassification = !!(argv['product-category'] || argv['product-function'] || argv['scene-or-need']);
   const problems = [...resolved.problems];
   if (!resolved.selected_row_id) problems.push('edit_requires_selected_identity（--entity-key 或 --row-id，且必须命中查询结果）');
   if (!argv.note) problems.push('edit_requires_note（显式提供内容，不自动追加默认备注）');
   if (!argv.reviewer) problems.push('edit_requires_reviewer（操作者身份必须显式给出，不冒充人工复核）');
   if (hasClassification && !argv['classification-evidence']) problems.push('edit_classification_requires_evidence_ref');
-  if (hasClassification && !argv['classification-state']) problems.push('edit_classification_requires_explicit_state（proposed|reviewed|rejected，不由工具代填 reviewed）');
+  // R9-STEP2.3：分类状态/复核状态**都不是必填**——不请求就保留既有值；请求了就只接受既有契约取值。
   const wantState = argv['classification-state'] ?? null;
-  if (hasClassification && wantState && !['proposed', 'reviewed', 'rejected'].includes(String(wantState))) problems.push(`invalid_classification_state:${wantState}`);
+  if (wantState && !['proposed', 'reviewed', 'rejected'].includes(String(wantState))) problems.push(`invalid_classification_state:${wantState}`);
+  const wantReviewStatus = argv['review-status'] ?? null;
+  if (wantReviewStatus && !['unreviewed', 'in_review', 'reviewed', 'rejected'].includes(String(wantReviewStatus))) problems.push(`invalid_review_status:${wantReviewStatus}`);
   const reviewer = argv.reviewer ?? null;
-  if (hasClassification && reviewer && /simon/i.test(String(reviewer))) problems.push('edit_must_not_claim_simon_approval（执行端不得代填 Simon 复核）');
+  if (hasClassification && !wantState && !argv['classification-evidence']) problems.push('edit_classification_requires_evidence_ref');
 
   const dir = ensureDir(path.join(OUT, 'edit'));
   if (problems.length) {
     const refused = {
       adapter: ADAPTER_VERSION, at: new Date().toISOString(), command: source,
-      target: targetDescriptor(opened), query, read_only: false, mutated: false, writes_performed: 0,
+      target: targetDescriptor(opened), query, read_only: false, mutated: false,
+      writes_attempted: 0, writes_performed: 0, writes_confirmed: 0, uncertain_outcome: false,
+      mutation: { attempted: false, write_accepted: false, confirmed: false, readback_ok: false, state: 'refused' },
       selected_row_id: resolved.selected_row_id, selected_entity_key: resolved.selected_entity_key,
       problems, ok: false,
-      note: '拒绝编辑：**未写入任何行**（无命中/身份不符/歧义/缺显式意图都会走到这里）。',
+      note: '拒绝编辑：**未尝试写入**（无命中/身份不符/歧义/缺显式意图都会走到这里）——拒绝 ≠ 发生了一次写入。',
     };
     if (writeReceipt) writeJson(path.join(dir, 'edit-receipt.json'), refused);
     log(`edit: REFUSED problems=${JSON.stringify(problems)} writes=0`);
@@ -468,55 +546,91 @@ async function cmdEdit({ opened: openedIn = null, query: queryIn = null, writeRe
     return refused;
   }
 
-  const before = await opened.backend.listAllRows(TABLE_VIDEOS);
-  const beforeRow = before.find((r) => String(r.id) === String(resolved.selected_row_id)) ?? null;
+  let beforeRow = null;
+  let edit = null;
   const classification = hasClassification ? {
     product_category: argv['product-category'] ?? null,
     product_function: argv['product-function'] ?? null,
     scene_or_need: argv['scene-or-need'] ?? null,
-    state: String(wantState),
+    ...(wantState ? { state: String(wantState) } : {}),
   } : null;
-  const edit = await applyTargetEdit({
-    backend: opened.backend, table: TABLE_VIDEOS, rowId: resolved.selected_row_id,
-    entityKey: resolved.selected_entity_key, note: String(argv.note), reviewer: String(reviewer),
-    classification, evidenceRef: argv['classification-evidence'] ?? null,
-    selectReference: String(argv['select-reference'] ?? 'true') === 'true',
-  });
+  try {
+    const before = await opened.backend.listAllRows(TABLE_VIDEOS);
+    beforeRow = before.find((r) => String(r.id) === String(resolved.selected_row_id)) ?? null;
+    edit = await applyTargetEdit({
+      backend: opened.backend, table: TABLE_VIDEOS, rowId: resolved.selected_row_id,
+      entityKey: resolved.selected_entity_key, note: String(argv.note), reviewer: String(reviewer),
+      classification, evidenceRef: argv['classification-evidence'] ?? null,
+      selectReference: String(argv['select-reference'] ?? 'true') === 'true',
+      reviewStatus: wantReviewStatus,
+    });
+  } catch (e) {
+    const failed = {
+      adapter: ADAPTER_VERSION, at: new Date().toISOString(), command: source,
+      target: targetDescriptor(opened), query, read_only: false,
+      mutated: null, writes_attempted: null, writes_performed: null, writes_confirmed: null, uncertain_outcome: true,
+      mutation: { attempted: true, write_accepted: null, confirmed: false, readback_ok: false, state: 'unknown_io_error', error: String(e.message) },
+      selected_row_id: resolved.selected_row_id, selected_entity_key: resolved.selected_entity_key,
+      target_row_before: beforeRow ? serializeTargetRow(beforeRow) : null,
+      problems: [`target_io_error:${String(e.message)}`], ok: false,
+      note: '目标读写异常：**写入是否落地未知**——既不声称成功，也不声称零写入；请按行 ID 复读核对。',
+    };
+    if (writeReceipt) writeJson(path.join(dir, 'edit-receipt.json'), failed);
+    log(`edit: IO-ERROR ${String(e.message)}（写入结果未知）`);
+    process.exitCode = 13;
+    return failed;
+  }
   // 最终读回：值/状态/来源/操作者逐项核对（只保留元数据却丢值必须失败）
-  const expectedState = classification ? classification.state : null;
   const verification = {
     row_present: !!edit.after,
     row_id_preserved: edit.after ? String(edit.after.id) === String(resolved.selected_row_id) : false,
     entity_key_preserved: edit.after ? String(edit.after[TABLE_PRIMARY_KEY[TABLE_VIDEOS]]) === String(resolved.selected_entity_key) : false,
     note_present: edit.after ? String(edit.after.review_notes ?? '').includes(String(argv.note)) : false,
     reviewer_matches: edit.after ? (edit.after.review_reviewer ?? null) === reviewer : false,
+    // 未显式请求复核状态 → 必须**保留**既有值（不把加备注当成已复核）
+    review_status_expected: edit.after
+      ? (edit.after.review_status ?? null) === (wantReviewStatus ?? beforeRow?.review_status ?? null)
+      : false,
   };
   if (classification) {
     for (const base of ['product_category', 'product_function', 'scene_or_need']) {
       const want = classification[base];
       if (want === null || want === undefined || want === '') continue;
       verification[`${base}_value`] = edit.after?.[base] === String(want);
-      verification[`${base}_state`] = edit.after?.[`${base}_state`] === expectedState;
+      verification[`${base}_state`] = (edit.after?.[`${base}_state`] ?? null) === (wantState ?? beforeRow?.[`${base}_state`] ?? null);
       verification[`${base}_evidence_ref`] = (edit.after?.[`${base}_evidence_ref`] ?? null) === (argv['classification-evidence'] ?? null);
       verification[`${base}_reviewer`] = (edit.after?.[`${base}_reviewer`] ?? null) === reviewer;
     }
   }
   const failed = Object.entries(verification).filter(([, v]) => v !== true).map(([k]) => k);
+  // R9-STEP2.4：**尝试写入 / 写入被接受 / 读回确认 / 拒绝 / 结果未知**分开记账（不与读回验证混同）
+  const mutation = edit.mutation ?? { attempted: false, write_accepted: false, confirmed: false, readback_ok: false, state: 'unknown' };
   const receipt = {
     adapter: ADAPTER_VERSION, at: new Date().toISOString(), command: source,
     target: targetDescriptor(opened), query,
-    read_only: false, mutated: edit.ok === true, writes_performed: edit.ok === true ? 1 : 0,
+    read_only: false,
+    mutated: mutation.write_accepted === true,                 // “目标行是否被写过”按**写入被接受**计
+    writes_attempted: mutation.attempted === true ? 1 : 0,
+    writes_performed: mutation.write_accepted === true ? 1 : 0, // 被接受=1；拒绝=0；未知写入时由 mutation.state 说明
+    writes_confirmed: mutation.confirmed === true ? 1 : 0,
+    uncertain_outcome: mutation.state === 'unknown_write' || mutation.state === 'written_unverified',
+    mutation,
     selected_row_id: resolved.selected_row_id, selected_entity_key: resolved.selected_entity_key,
     identity_checks: { duplicate_keys: resolved.duplicate_keys, in_query_hits: true, namespace: argv.namespace ?? null },
-    intended: { note: argv.note, reviewer, classification, evidence_ref: argv['classification-evidence'] ?? null, select_reference: String(argv['select-reference'] ?? 'true') === 'true' },
+    intended: {
+      note: argv.note, reviewer, classification,
+      evidence_ref: argv['classification-evidence'] ?? null,
+      select_reference: String(argv['select-reference'] ?? 'true') === 'true',
+      review_status: wantReviewStatus,
+    },
     target_row_before: beforeRow ? serializeTargetRow(beforeRow) : null,
     target_row_after: edit.after ? serializeTargetRow(edit.after) : null,
     edit_checks: edit.checks, verification, verification_failed: failed,
-    ok: edit.ok === true && failed.length === 0,
-    note: '显式编辑：身份由查询命中 + 显式选择共同确定；证据/状态/操作者原样带入并复读核对。',
+    ok: mutation.state === 'confirmed' && failed.length === 0,
+    note: '显式编辑：身份由查询命中 + 显式选择共同确定；证据/状态/操作者原样带入并复读核对；写入与读回分开记账。',
   };
   if (writeReceipt) writeJson(path.join(dir, 'edit-receipt.json'), receipt);
-  log(`edit: row_id=${resolved.selected_row_id} ok=${receipt.ok} state=${expectedState ?? 'n/a'} reviewer=${reviewer} failed=${JSON.stringify(failed)}`);
+  log(`edit: row_id=${resolved.selected_row_id} ok=${receipt.ok} mutation=${mutation.state} accepted=${mutation.write_accepted} confirmed=${mutation.confirmed} state=${wantState ?? 'preserved'} review_status=${wantReviewStatus ?? 'preserved'} reviewer=${reviewer} failed=${JSON.stringify(failed)}`);
   if (!receipt.ok) process.exitCode = 13;
   return receipt;
 }
@@ -540,18 +654,38 @@ async function cmdExport() {
   }));
   const counts = Object.fromEntries(ALL_TABLES.map((t) => [t, data[t].length]));
 
-  // 可选的“选中行”声明：一旦声明就必须真的在快照里（否则显式失败，不伪造 selected-row 成功）
+  // 可选的“选中行”声明：一旦声明就必须真的在快照里（否则显式失败，不伪造 selected-row 成功）。
+  // R9-STEP3.1：row-id 与 entity-key **同时给出时必须指向同一唯一行**；冲突即拒绝。
   const wantedKey = argv['entity-key'] ?? null;
   const wantedRowId = argv['row-id'] ?? null;
+  const pkVideos = TABLE_PRIMARY_KEY[TABLE_VIDEOS];
   let selectedRow = null;
   const problems = [];
-  if (wantedKey !== null || wantedRowId !== null) {
-    const pk = TABLE_PRIMARY_KEY[TABLE_VIDEOS];
-    const matches = data[TABLE_VIDEOS].filter((r) => (wantedRowId !== null ? String(r.id) === String(wantedRowId) : String(r?.[pk]) === String(wantedKey)));
-    if (matches.length === 0) problems.push('selected_identity_not_in_snapshot');
-    else if (matches.length > 1) problems.push('selected_identity_ambiguous_in_snapshot');
-    else selectedRow = matches[0];
+  let keyMatch = null, idMatch = null;
+  if (wantedKey !== null) {
+    const m = data[TABLE_VIDEOS].filter((r) => String(r?.[pkVideos]) === String(wantedKey));
+    if (m.length === 0) problems.push('selected_entity_key_not_in_snapshot');
+    else if (m.length > 1) problems.push('selected_entity_key_ambiguous_in_snapshot');
+    else keyMatch = m[0];
   }
+  if (wantedRowId !== null) {
+    const m = data[TABLE_VIDEOS].filter((r) => String(r.id) === String(wantedRowId));
+    if (m.length === 0) problems.push('selected_row_id_not_in_snapshot');
+    else if (m.length > 1) problems.push('selected_row_id_ambiguous_in_snapshot');
+    else idMatch = m[0];
+  }
+  if (keyMatch && idMatch) {
+    if (String(keyMatch.id) !== String(idMatch.id)) problems.push(`conflicting_selection:row_id=${wantedRowId}≠entity_key=${wantedKey}`);
+    else selectedRow = keyMatch;
+  } else {
+    selectedRow = keyMatch ?? idMatch ?? null;
+  }
+  const selectionCheck = {
+    row_id_supplied: wantedRowId !== null, entity_key_supplied: wantedKey !== null,
+    both_supplied: wantedRowId !== null && wantedKey !== null,
+    consistent: keyMatch && idMatch ? String(keyMatch.id) === String(idMatch.id) : null,
+    resolved_row_id: selectedRow?.id ?? null, resolved_entity_key: selectedRow ? selectedRow[pkVideos] : null,
+  };
   const selectedAssets = selectedRow ? data[TABLE_ASSETS].filter((a) => a.entity_key === selectedRow[TABLE_PRIMARY_KEY[TABLE_VIDEOS]]) : [];
   const selectedSegments = selectedRow ? data[TABLE_SEGMENTS].filter((s) => s.entity_key === selectedRow[TABLE_PRIMARY_KEY[TABLE_VIDEOS]]) : [];
 
@@ -582,14 +716,15 @@ async function cmdExport() {
   const receipt = {
     adapter: ADAPTER_VERSION, at: new Date().toISOString(), command: 'export',
     target: targetDescriptor(opened),
-    read_only: true, mutated: false, writes_performed: 0,
+    read_only: true, mutated: false, writes_attempted: 0, writes_performed: 0, writes_confirmed: 0,
     bundle_path: bundlePath, bundle_bytes: bytes.length, bundle_sha256: crypto.createHash('sha256').update(bytes).digest('hex'),
     counts, table_key_sets: keySets,
+    selection: selectionCheck,
     selected_row_id: selectedRow?.id ?? null, selected_entity_key: selectedRow ? selectedRow[TABLE_PRIMARY_KEY[TABLE_VIDEOS]] : null,
     media_service: publication.receipt,
     problems, ok: problems.length === 0,
     steps: [{ step: 'list_existing_rows', ok: true, tables: counts }, { step: 'write_bundle', ok: true, path: bundlePath }],
-    note: '只读导出：未导入、未建结构、未编辑、未复跑；行数据来自既有目标的读回。',
+    note: '只读导出：未导入、未建结构、未编辑、未复跑；行数据来自既有目标的读回；row-id 与 entity-key 同时给出时必须指向同一行。',
   };
   writeJson(path.join(dir, 'export-receipt.json'), receipt);
   log(`export: read_only=true target=${opened.target_mode} counts=${JSON.stringify(counts)} bundle=${bytes.length}B`);
@@ -667,23 +802,38 @@ async function cmdRestore() {
     restoredKeys[t] = restoredRows[t].map((r) => String(r?.[TABLE_PRIMARY_KEY[t]])).sort();
   }
   const expectedKeys = bundle?.snapshot?.table_key_sets ?? {};
+  const expectedCounts = bundle?.snapshot?.counts ?? {};
   for (const t of ALL_TABLES) {
     const want = expectedKeys[t] ?? [];
     const got = restoredKeys[t];
     if (JSON.stringify(want) !== JSON.stringify(got)) {
       receipt.findings.push({ level: 'fail', id: 'table_key_set_mismatch', table: t, expected_count: want.length, actual_count: got.length, missing: want.filter((k) => !got.includes(k)).slice(0, 5), unexpected: got.filter((k) => !want.includes(k)).slice(0, 5) });
     }
+    // R9-STEP3.3：计数也要单独核对（键集合相同但重复行折叠的情况）
+    if (expectedCounts[t] !== undefined && Number(expectedCounts[t]) !== restoredRows[t].length) {
+      receipt.findings.push({ level: 'fail', id: 'table_count_mismatch', table: t, expected: Number(expectedCounts[t]), actual: restoredRows[t].length });
+    }
   }
-  // 必需关联：Assets/Segments/Metrics/Ratios 的 link_row 目标行必须存在（link 指向目标**行 ID**）
-  const videoIds = new Set(restoredRows[TABLE_VIDEOS].map((r) => String(r.id)));
-  const assetRowIds = new Set(restoredRows[TABLE_ASSETS].map((r) => String(r.id)));
+  // 必需关联：link_row 指向的目标必须是**身份正确**的那一行（不是“任意存在的行 ID”）
+  const videoIdByKey = new Map(restoredRows[TABLE_VIDEOS].map((r) => [String(r[TABLE_PRIMARY_KEY[TABLE_VIDEOS]]), String(r.id)]));
+  const assetRowIdByAssetId = new Map(restoredRows[TABLE_ASSETS].map((r) => [String(r.asset_id), String(r.id)]));
   for (const [t, fields] of Object.entries(LINK_FIELDS)) {
     for (const row of restoredRows[t]) {
       for (const [field, targetTable] of Object.entries(fields)) {
         const ids = (row[field] ?? []).map((x) => String(x && typeof x === 'object' ? x.id : x));
         if (!ids.length) { receipt.findings.push({ level: 'fail', id: 'required_relation_missing', table: t, key: row[TABLE_PRIMARY_KEY[t]], field }); continue; }
-        const pool = targetTable === TABLE_VIDEOS ? videoIds : targetTable === TABLE_ASSETS ? assetRowIds : null;
-        for (const id of ids) if (pool && !pool.has(id)) receipt.findings.push({ level: 'fail', id: 'relation_target_not_restored', table: t, key: row[TABLE_PRIMARY_KEY[t]], field, target_id: id });
+        const expectedTargetId = targetTable === TABLE_VIDEOS
+          ? videoIdByKey.get(String(row.entity_key)) ?? null
+          : targetTable === TABLE_ASSETS
+            ? assetRowIdByAssetId.get(String(row.asset_id)) ?? null
+            : null;
+        if (expectedTargetId === null) {
+          receipt.findings.push({ level: 'fail', id: 'relation_expected_target_missing', table: t, key: row[TABLE_PRIMARY_KEY[t]], field, own_identity: targetTable === TABLE_VIDEOS ? row.entity_key : row.asset_id });
+          continue;
+        }
+        if (ids.length !== 1 || ids[0] !== expectedTargetId) {
+          receipt.findings.push({ level: 'fail', id: 'relation_target_identity_mismatch', table: t, key: row[TABLE_PRIMARY_KEY[t]], field, expected_target_id: expectedTargetId, actual_target_ids: ids });
+        }
       }
     }
   }
@@ -704,18 +854,22 @@ async function cmdRestore() {
       const got = restoredRows[TABLE_ASSETS].find((r) => String(r.asset_id) === String(a.asset_id)) ?? null;
       if (!got) { receipt.findings.push({ level: 'fail', id: 'selected_asset_missing_after_restore', asset_id: a.asset_id }); continue; }
       if ((got.media_view_url ?? null) !== (a.media_view_url ?? null)) receipt.findings.push({ level: 'fail', id: 'asset_media_url_mismatch', asset_id: a.asset_id, expected: a.media_view_url ?? null, actual: got.media_view_url ?? null });
-      if ((got.media_service_state ?? null) !== (a.media_service_state ?? null)) receipt.findings.push({ level: 'fail', id: 'asset_media_state_mismatch', asset_id: a.asset_id });
+      if ((got.media_view_path ?? null) !== (a.media_view_path ?? null)) receipt.findings.push({ level: 'fail', id: 'asset_media_path_mismatch', asset_id: a.asset_id, expected: a.media_view_path ?? null, actual: got.media_view_path ?? null });
+      if ((got.media_service_state ?? null) !== (a.media_service_state ?? null)) receipt.findings.push({ level: 'fail', id: 'asset_media_state_mismatch', asset_id: a.asset_id, expected: a.media_service_state ?? null, actual: got.media_service_state ?? null });
     }
     for (const s of bundle?.snapshot?.selected_media?.segments ?? []) {
       const got = restoredRows[TABLE_SEGMENTS].find((r) => String(r.segment_id) === String(s.segment_id)) ?? null;
       if (!got) { receipt.findings.push({ level: 'fail', id: 'selected_segment_missing_after_restore', segment_id: s.segment_id }); continue; }
       if ((got.view_url ?? null) !== (s.view_url ?? null)) receipt.findings.push({ level: 'fail', id: 'segment_view_url_mismatch', segment_id: s.segment_id, expected: s.view_url ?? null, actual: got.view_url ?? null });
+      if ((got.view_path ?? null) !== (s.view_path ?? null)) receipt.findings.push({ level: 'fail', id: 'segment_view_path_mismatch', segment_id: s.segment_id, expected: s.view_path ?? null, actual: got.view_path ?? null });
+      if ((got.media_service_state ?? null) !== (s.media_service_state ?? null)) receipt.findings.push({ level: 'fail', id: 'segment_media_state_mismatch', segment_id: s.segment_id, expected: s.media_service_state ?? null, actual: got.media_service_state ?? null });
     }
   } else {
     receipt.findings.push({ level: 'info', id: 'snapshot_has_no_selected_row', note: '快照未声明选中行 → 只核对五表键集合/计数与关联，不伪造 selected-row 成功。' });
   }
   receipt.restored_counts = Object.fromEntries(ALL_TABLES.map((t) => [t, restoredRows[t].length]));
   receipt.expected_counts = bundle?.snapshot?.counts ?? null;
+  receipt.media_service_declared = bundle?.snapshot?.media_service ?? null;
   receipt.restore_root = restoreRoot;
   receipt.restore_errors = restoreErrors;
   receipt.ok = !receipt.findings.some((f) => f.level === 'fail');
@@ -1376,9 +1530,24 @@ async function cmdJourney() {
   const setupFixture = argv['setup-fixture'] === true;
   const dir = ensureDir(path.join(OUT, 'journey'));
 
-  // ---------------------------------------------------------------- R8-STEP2：默认=只读
-  // 普通 journey **只消费既有目标**：不建结构、不导入、不写覆盖层、不加默认备注。
-  // 需要写入时必须显式 `--edit`，并给出身份、内容、操作者、状态与证据引用。
+  // ---------------------------------------------------------------- R9-STEP2.1：journey **只读**
+  // 普通 journey 只做「只读查询 + 详情/媒体」；**不接受**任何写入意图：
+  //   · 传 `--edit` → **在任何写入之前显式拒绝**（exit 16）并指向独立 `edit` 命令，绝不静默忽略；
+  //   · 公共 journey 不再保留任何目标侧写入路径（夹具演示也只在隔离覆盖层上准备，不做目标侧编辑）。
+  if (argv.edit === true) {
+    const refused = {
+      adapter: ADAPTER_VERSION, at: new Date().toISOString(), command: 'journey',
+      read_only: true, mutated: false, writes_attempted: 0, writes_performed: 0, writes_confirmed: 0,
+      error: 'journey_edit_removed',
+      problems: ['journey_no_longer_writes：journey 已改为只读；改用 `cli.mjs edit --target … --entity-key/--row-id --note … --reviewer …` 做显式编辑'],
+      ok: false,
+      note: '显式拒绝：journey 的写入路径已移除，未尝试任何写入（也不静默忽略 --edit）。',
+    };
+    writeJson(path.join(dir, 'journey-transcript.json'), refused);
+    log('journey: REFUSED --edit（journey 只读；请用 `edit` 命令）writes=0');
+    process.exitCode = 16;
+    return refused;
+  }
   if (!setupFixture) {
     const openRes = await openTargetOrFail('journey', 'journey');
     if (!openRes.opened) return openRes.receipt;
@@ -1393,16 +1562,16 @@ async function cmdJourney() {
     const videos = shownKey ? (await opened.backend.listAllRows(TABLE_VIDEOS)).filter((r) => String(r[TABLE_PRIMARY_KEY[TABLE_VIDEOS]]) === String(shownKey)) : [];
     const assets = shownKey ? (await opened.backend.listAllRows(TABLE_ASSETS)).filter((r) => r.entity_key === shownKey) : [];
     const segments = shownKey ? (await opened.backend.listAllRows(TABLE_SEGMENTS)).filter((r) => r.entity_key === shownKey) : [];
-    let edit = null;
-    if (argv.edit === true) edit = await cmdEdit({ opened, query: queryFromArgv(argv, 'query-'), writeReceipt: false, source: 'journey_edit' });
     const transcript = {
       at: new Date().toISOString(),
-      order: 'R8 STEP2 用户旅程：只读查询既有目标（写入必须显式 --edit）',
+      order: 'R9 STEP2 用户旅程：**只读**查询既有目标（写入一律走独立 edit 命令）',
       target: targetDescriptor(opened),
       query: { platform, require_local_video: wantMedia, dimensions: query },
-      read_only: argv.edit !== true,
-      mutated: argv.edit === true,
-      writes_performed: argv.edit === true ? 1 : 0,
+      read_only: true,
+      mutated: false,
+      writes_attempted: 0,
+      writes_performed: 0,
+      writes_confirmed: 0,
       hit_count: resolved.hit_count, scanned_rows: resolved.scanned_rows,
       hits: resolved.hits.slice(0, 25),
       shown_identity: shownKey,
@@ -1412,13 +1581,14 @@ async function cmdJourney() {
         segments: segments.map((s) => ({ segment_id: s.segment_id, view_path: s.view_path ?? null, view_url: s.view_url ?? null, media_service_state: s.media_service_state ?? null })),
       },
       selected_row: resolved.selected, problems: resolved.problems, duplicate_keys: resolved.duplicate_keys,
-      edit_receipt: edit,
-      ok: resolved.ok && (argv.edit === true ? edit?.ok === true : true),
+      target_row_snapshot: videos[0] ? serializeTargetRow(videos[0]) : null,
+      edit_receipt: null,
+      ok: resolved.ok,
       baserow_ui_verified: false,
-      note: '只读旅程：命中来自目标库行；详情/媒体指向被选中的目标身份；未导入、未写覆盖层、未加默认备注。',
+      note: '只读旅程：命中来自目标库行；详情/媒体指向被选中的目标身份；未导入、未写覆盖层、未加默认备注、无写入路径。',
     };
     writeJson(path.join(dir, 'journey-transcript.json'), transcript);
-    const md = ['# 用户旅程回执（R8：只读查询既有目标）', '',
+    const md = ['# 用户旅程回执（R9：只读查询既有目标）', '',
       `- 时间：${transcript.at}`, `- 目标：${transcript.target.target_mode}/${transcript.target.backend_kind} transport=${transcript.target.transport}`,
       `- 查询条件：${JSON.stringify(query)}`,
       `- 扫描 ${transcript.scanned_rows} 行；命中 ${transcript.hit_count} 条；展示身份 \`${transcript.shown_identity ?? 'none'}\``,
@@ -1473,18 +1643,8 @@ async function cmdJourney() {
   // R7-STEP3：媒体发布语义与 import 共用同一解析（未指定 ≠ 显式停止发布）
   const resolvedPublication = resolveMediaPublication(argv);
 
-  // R8-STEP2：隔离演示里的“编辑”同样是**显式动作**（--edit），且必须给出操作者、状态与证据引用；
-  // 工具**不再**把执行端提案升级成 reviewed，也不再自动追加默认人工编辑。
-  const demoEditRequested = argv.edit === true;
-  if (demoEditRequested) {
-    if (!argv['manual-reviewer']) throw new Error('journey_edit_requires_reviewer：--edit 必须给出 --manual-reviewer（操作者身份）');
-    if (hasClassification && !argv['classification-state']) throw new Error('journey_edit_requires_explicit_classification_state：--edit 带分类时必须显式 --classification-state（不由工具代填 reviewed）');
-    if (hasClassification && !classificationEvidenceRef) throw new Error('journey_edit_requires_evidence_ref：--edit 带分类时必须给出 --classification-evidence');
-    if (argv['classification-state'] && !['proposed', 'reviewed', 'rejected'].includes(String(argv['classification-state']))) {
-      throw new Error(`invalid_classification_state:${argv['classification-state']}`);
-    }
-  }
-
+  // R9-STEP2.1：夹具演示**不再**做目标侧编辑（公共 journey 已无写入路径）；
+  // 上面 `--edit` 分支已在任何写入之前显式拒绝，故这里不存在另一种写入入口。
   const res = await runJourney({
     records,
     loadWithOverlay: async (p) => (await loadAll(p)).records,
@@ -1500,13 +1660,8 @@ async function cmdJourney() {
     createBackend: () => createMemoryBackend(),
     setupFixture,
     mediaBaseUrl: resolvedPublication.mediaBaseUrl,
-    // 只在显式 --edit 时才做目标侧人工编辑
-    manualEdit: demoEditRequested ? {
-      note: argv['manual-note'] ?? '目标侧显式人工编辑（带原因）',
-      reviewer: String(argv['manual-reviewer']),
-      classification: classification ? { ...classification, state: String(argv['classification-state']) } : null,
-      evidenceRef: classificationEvidenceRef,
-    } : null,
+    // 夹具演示只做「隔离覆盖层准备 + 导入 + 目标行只读断言」，不做人工编辑
+    manualEdit: null,
     // R5 STEP3：明确验证“没有命中也要诚实”
     noMatchQuery: { product_category: argv['no-match-probe'] ?? '不可能存在的类别-探针' },
   });

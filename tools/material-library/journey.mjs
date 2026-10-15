@@ -8,7 +8,7 @@
 //   ② lookupTarget(...)         —— **只读**目标库查询：消费所选 backend 的行，报告目标行 ID / entity key / query，
 //                                  不调用 setReview、不改覆盖层、不改行
 //   ③ runJourney(...)           —— 编排：导入 → 只读查询（命中/未命中）→ 单独人工编辑 → 再导入 → 再查询 → 目标行断言
-import { ALL_TABLES, TABLE_ASSETS, TABLE_PRIMARY_KEY, TABLE_SEGMENTS, TABLE_VIDEOS, importRecords } from './baserow.mjs';
+import { ALL_TABLES, CLASSIFICATION_BASE_FIELDS, TABLE_ASSETS, TABLE_PRIMARY_KEY, TABLE_SEGMENTS, TABLE_VIDEOS, importRecords } from './baserow.mjs';
 import { loadOverlay, saveOverlay, setReview } from './review.mjs';
 
 export function classificationGapsOf(record) {
@@ -158,26 +158,59 @@ export function prepareFixtureSetup({
  * R6-STEP2：**目标侧**显式人工编辑。走目标 backend 的 updateRow，然后复读并逐项核对，
  * 而不是只改源侧覆盖层（那只会在下一次导入时被人工字段保护策略挡回，目标行根本不会变）。
  */
+/**
+ * R6-STEP2 / R9-STEP2：**目标侧**显式人工编辑。走目标 backend 的 updateRow，然后复读并逐项核对。
+ *
+ * R9 三条诚实性要求（本轮修正）：
+ *  · **不**为一条备注或执行端提案强行把 `review_status` 改成 `reviewed`——未显式请求就**保留原状态**；
+ *    显式请求时只接受既有复核契约的取值（review.mjs 的 REVIEW_STATUS）。
+ *  · 分类状态（`*_state`）同理：未显式给出就保留原值，不再默认写成 `reviewed`。
+ *  · **写入状态与读回验证分开记账**：请求被接受但复读失败 → 不得声称“零写入”；被拒绝 → 不得因为
+ *    调用方传了意图就算一次写入。返回 `mutation` 明确 attempted / write_accepted / confirmed / state。
+ */
 export async function applyTargetEdit({
   backend, table = TABLE_VIDEOS, rowId, entityKey = null, note,
   reviewer = null, classification = null, evidenceRef = null, selectReference = true,
+  reviewStatus = null, origin = 'human_review',
 } = {}) {
   if (!backend) throw new Error('target_edit_requires_backend');
   if (rowId === null || rowId === undefined) throw new Error('target_edit_requires_row_id');
+  const VALID_REVIEW_STATUS = ['unreviewed', 'in_review', 'reviewed', 'rejected'];
+  const VALID_CLASSIFICATION_STATE = ['proposed', 'reviewed', 'rejected'];
+  const requestedReviewStatus = reviewStatus === null || reviewStatus === undefined || reviewStatus === '' ? null : String(reviewStatus);
+  if (requestedReviewStatus && !VALID_REVIEW_STATUS.includes(requestedReviewStatus)) {
+    return {
+      ok: false, refused: true, row_id: rowId, reviewer, before: null, after: null,
+      problems: [`invalid_review_status:${requestedReviewStatus}（允许：${VALID_REVIEW_STATUS.join('|')}）`],
+      mutation: { attempted: false, write_accepted: false, confirmed: false, readback_ok: false, state: 'refused' },
+      checks: [{ name: 'review_status_valid', ok: false, detail: { wanted: requestedReviewStatus } }],
+    };
+  }
   const pk = TABLE_PRIMARY_KEY[table];
   const rows = await backend.listAllRows(table);
   const before = rows.find((r) => String(r.id) === String(rowId)) ?? null;
   if (!before) {
-    return { ok: false, row_id: rowId, reviewer, checks: [{ name: 'target_row_exists', ok: false, detail: { row_id: rowId } }], before: null, after: null };
+    return {
+      ok: false, refused: true, row_id: rowId, reviewer, before: null, after: null,
+      problems: [`target_row_not_found:${rowId}`],
+      mutation: { attempted: false, write_accepted: false, confirmed: false, readback_ok: false, state: 'refused' },
+      checks: [{ name: 'target_row_exists', ok: false, detail: { row_id: rowId } }],
+    };
   }
   if (entityKey && before[pk] !== undefined && String(before[pk]) !== String(entityKey)) {
-    return { ok: false, row_id: rowId, reviewer, before, after: null, checks: [{ name: 'target_row_identity_match', ok: false, detail: { wanted: entityKey, actual: before[pk] } }] };
+    return {
+      ok: false, refused: true, row_id: rowId, reviewer, before, after: null,
+      problems: [`target_row_identity_mismatch:${entityKey}!=${before[pk]}`],
+      mutation: { attempted: false, write_accepted: false, confirmed: false, readback_ok: false, state: 'refused' },
+      checks: [{ name: 'target_row_identity_match', ok: false, detail: { wanted: entityKey, actual: before[pk] } }],
+    };
   }
   const appended = [before.review_notes, note].filter(Boolean).join('\n') || String(note ?? '');
   const patch = {
-    review_notes: appended, review_status: 'reviewed',
-    review_reviewer: reviewer ?? null, selected_reference: selectReference === true,
+    review_notes: appended, review_reviewer: reviewer ?? null, selected_reference: selectReference === true,
   };
+  // R9：只有**显式请求**才写 review_status；否则保留目标既有状态（不把“加备注”等同于“已复核”）
+  if (requestedReviewStatus) patch.review_status = requestedReviewStatus;
   // R7-STEP2：只允许既有分类契约的三个**值**字段；`state` 与 evidence/reviewer 是**元数据**，
   // 不能当成字段写进去（否则 memory 会存下 state/state_origin/state_reviewer 之类非 schema 垃圾，
   // 而 HTTP 边界又会把它们丢掉 —— 两端行为不一致）。
@@ -186,27 +219,63 @@ export async function applyTargetEdit({
   const ignoredKeys = [];
   if (classification) {
     for (const key of Object.keys(classification)) {
-      if (key === 'state' || key === 'evidence_ref' || CLASSIFICATION_BASES.includes(key)) continue;
+      if (key === 'state' || key === 'evidence_ref' || key === 'origin' || CLASSIFICATION_BASES.includes(key)) continue;
       ignoredKeys.push(key);
     }
+    const requestedState = classification.state === null || classification.state === undefined || classification.state === ''
+      ? null : String(classification.state);
+    if (requestedState && !VALID_CLASSIFICATION_STATE.includes(requestedState)) {
+      return {
+        ok: false, refused: true, row_id: rowId, reviewer, before, after: null,
+        problems: [`invalid_classification_state:${requestedState}（允许：${VALID_CLASSIFICATION_STATE.join('|')}）`],
+        mutation: { attempted: false, write_accepted: false, confirmed: false, readback_ok: false, state: 'refused' },
+        checks: [{ name: 'classification_state_valid', ok: false, detail: { wanted: requestedState } }],
+      };
+    }
+    const requestedOrigin = classification.origin ?? origin ?? null;
     for (const base of CLASSIFICATION_BASES) {
       const v = classification[base];
       if (v === null || v === undefined || v === '') continue;
       patch[base] = String(v);
-      patch[`${base}_origin`] = 'human_review';
+      patch[`${base}_origin`] = requestedOrigin;
       patch[`${base}_reviewer`] = reviewer ?? null;
       patch[`${base}_evidence_ref`] = evidenceRef ?? null;
-      patch[`${base}_state`] = classification.state ?? 'reviewed';
-      appliedClassification[base] = { value: String(v), state: patch[`${base}_state`] };
+      // 未显式给出状态 → **保留目标既有状态**（读回时按 before 核对，而不是按“应该等于 reviewed”）
+      const keepState = requestedState === null ? (before[`${base}_state`] ?? null) : requestedState;
+      if (requestedState !== null) patch[`${base}_state`] = requestedState;
+      appliedClassification[base] = { value: String(v), state: keepState, state_requested: requestedState !== null };
     }
   }
-  await backend.updateRow(table, rowId, patch);
-  const after = (await backend.listAllRows(table)).find((r) => String(r.id) === String(rowId)) ?? null;
+
+  // ---- 写入与读回**分开记账**（R9 STEP2.4）----
+  const mutation = { attempted: true, write_accepted: false, confirmed: false, readback_ok: false, state: 'not_written', error: null };
+  try {
+    await backend.updateRow(table, rowId, patch);
+    mutation.write_accepted = true;
+    mutation.state = 'written_unverified';
+  } catch (e) {
+    // 写入抛错 ≠ 确定没写进去（可能是超时/不确定写入）→ 先复读再判定
+    mutation.error = String(e.message);
+    mutation.state = 'unknown_write';
+  }
+  let after = null;
+  try {
+    after = (await backend.listAllRows(table)).find((r) => String(r.id) === String(rowId)) ?? null;
+    mutation.readback_ok = !!after;
+  } catch (e) {
+    mutation.readback_error = String(e.message);
+  }
+  if (!mutation.readback_ok) {
+    // 读回失败：写入是否落地**未知**，不得声称零写入
+    mutation.state = mutation.write_accepted ? 'written_unverified' : 'unknown_write';
+  }
+
+  const expectedReviewStatus = requestedReviewStatus ?? (before.review_status ?? null);
   const checks = [
     { name: 'target_row_exists', ok: true },
     { name: 'reread_row_present', ok: !!after },
     { name: 'review_notes_applied', ok: (after?.review_notes ?? null) === appended, detail: { wanted: appended, actual: after?.review_notes ?? null } },
-    { name: 'review_status_applied', ok: after?.review_status === 'reviewed' },
+    { name: 'review_status_preserved_or_requested', ok: (after?.review_status ?? null) === expectedReviewStatus, detail: { wanted: expectedReviewStatus, actual: after?.review_status ?? null, explicitly_requested: requestedReviewStatus } },
     { name: 'reviewer_applied', ok: (after?.review_reviewer ?? null) === (reviewer ?? null) },
     { name: 'selected_reference_applied', ok: after?.selected_reference === (selectReference === true) },
   ];
@@ -217,30 +286,50 @@ export async function applyTargetEdit({
       detail: { wanted: want.value, actual: after?.[base] ?? null },
     });
     checks.push({
-      name: `${base}_state_applied`, ok: after?.[`${base}_state`] === want.state,
-      detail: { wanted: want.state, actual: after?.[`${base}_state`] ?? null },
+      name: `${base}_state_applied`, ok: (after?.[`${base}_state`] ?? null) === want.state,
+      detail: { wanted: want.state, actual: after?.[`${base}_state`] ?? null, explicitly_requested: want.state_requested },
     });
     checks.push({
       name: `${base}_provenance_applied`,
-      ok: after?.[`${base}_origin`] === 'human_review'
+      ok: after?.[`${base}_origin`] === patch[`${base}_origin`]
         && (after?.[`${base}_evidence_ref`] ?? null) === (evidenceRef ?? null)
         && (after?.[`${base}_reviewer`] ?? null) === (reviewer ?? null),
       detail: { origin: after?.[`${base}_origin`] ?? null, evidence_ref: after?.[`${base}_evidence_ref`] ?? null, reviewer: after?.[`${base}_reviewer`] ?? null },
     });
   }
-  return { ok: checks.every((c) => c.ok), row_id: rowId, reviewer, applied: patch, classification: appliedClassification, ignored_classification_keys: ignoredKeys, checks, before, after };
+  const allChecksOk = checks.every((c) => c.ok);
+  if (mutation.readback_ok) mutation.confirmed = allChecksOk;
+  if (mutation.readback_ok && !allChecksOk) mutation.state = mutation.write_accepted ? 'written_but_mismatched' : 'not_written';
+  if (mutation.readback_ok && allChecksOk && mutation.write_accepted) mutation.state = 'confirmed';
+  if (!mutation.write_accepted && !mutation.readback_ok) mutation.state = 'unknown_write';
+  return {
+    ok: mutation.state === 'confirmed',
+    refused: false,
+    row_id: rowId, reviewer,
+    requested_review_status: requestedReviewStatus,
+    applied: patch, classification: appliedClassification, ignored_classification_keys: ignoredKeys,
+    checks, before, after,
+    mutation,
+    note: '写入状态与读回验证分开记账：attempted/write_accepted/confirmed/state 各自独立。',
+  };
 }
 
-/** 目标行的可核对序列化（只取与 A4/A5 相关的字段，避免把整行塞进回执）。 */
+/**
+ * 目标行的可核对序列化（R9-STEP3.2）：**三个分类基准各自的**值 + 来源 + 复核人 + 证据引用 + 状态，
+ * 加上既有手工字段。不臆造未填充的分类（缺失即为 null），也不丢任何一个维度。
+ */
 export function serializeTargetRow(row) {
   if (!row) return null;
-  const fields = [
-    'review_status', 'review_notes', 'review_reviewer', 'selected_reference', 'review_stale', 'review_stale_reason',
-    'product_category', 'product_category_origin', 'product_category_reviewer', 'product_category_evidence_ref', 'product_category_state',
-    'product_function', 'scene_or_need',
-  ];
+  const fields = ['review_status', 'review_notes', 'review_reviewer', 'selected_reference', 'review_stale', 'review_stale_reason'];
   const out = { row_id: row.id ?? null, entity_key: row.entity_key ?? null };
   for (const f of fields) out[f] = row[f] ?? null;
+  for (const base of CLASSIFICATION_BASE_FIELDS) {
+    out[base] = row[base] ?? null;
+    out[`${base}_origin`] = row[`${base}_origin`] ?? null;
+    out[`${base}_reviewer`] = row[`${base}_reviewer`] ?? null;
+    out[`${base}_evidence_ref`] = row[`${base}_evidence_ref`] ?? null;
+    out[`${base}_state`] = row[`${base}_state`] ?? null;
+  }
   return out;
 }
 

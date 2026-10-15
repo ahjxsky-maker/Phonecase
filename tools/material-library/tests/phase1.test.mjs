@@ -18,6 +18,11 @@ import {
   V5_VALUE_SEMANTICS, CENSUS_FIELD_TO_V5_MEANING,
 } from '../rules.mjs';
 import { mediaKindOf, normalizeEntity } from '../normalize.mjs';
+import {
+  KEY_METRIC_FIELDS, indexLatestRealMetrics, keyMetricsOf, countRealObservations,
+  metricNumber, isRealObservation, businessTitleOf, shortKey, reviewStatusTerm,
+  sourceStateTerm, formatMetricValue, sortByIndustryPriority, industryPriorityKey,
+} from '../panel-metrics.mjs';
 import { applyOverlay, loadOverlay, saveOverlay, setReview, splitTestIdentities } from '../review.mjs';
 import { applyTargetEdit, filterByNeed, lookupTarget, runJourney } from '../journey.mjs';
 import { buildRepresentativeSample, coverageOf, resolveManifest, validateManifest } from '../sample.mjs';
@@ -25,7 +30,9 @@ import { createMediaIndex, createMediaServer, playerCheck, verifyMediaRoute } fr
 import {
   HUMAN_FIELDS, TABLE_ASSETS, TABLE_METRICS, TABLE_PRIMARY_KEY, TABLE_RATIOS, TABLE_SEGMENTS, TABLE_VIDEOS,
   ALL_TABLES, HTTP_ROUTES, createHttpBackend, createHttpClient, createMemoryBackend,
-  decodeApiRow, encodeFilterValue, encodeWritePayload, ensureSchemaAndViews, importRecords,
+  decodeApiRow, detectDuplicateTargetKeys, encodeFilterValue, encodeWritePayload, ensureSchemaAndViews,
+  importRecords, logicalEqual, isIgnorableLinkOrderArtifact, isLinkShaped, linkFieldNames,
+  LINK_FIELDS, REVERSE_LINK_FIELDS, parentRelationKeyField, reverseRelationExpectedIds,
   planMerge, planSchema, planViews, reconcileInterrupted, rowsOf,
 } from '../baserow.mjs';
 
@@ -929,7 +936,10 @@ test('R4-F1b: API-shaped select/link rows decode to logical values; writes carry
   assert.equal('media_file' in payload, false, '文件字段不得在行写入里伪造');
   assert.equal(payload.review_status, 'reviewed', '无选项元数据时按逻辑值发送，不伪造选项 ID');
   const meta = { review_status: { select_options: [{ id: 79, value: 'reviewed' }] } };
-  assert.equal(encodeWritePayload(TABLE_VIDEOS, { review_status: 'reviewed' }, meta).review_status, '79', '有选项元数据时发选项 ID');
+  // R11 更正（真实 2.4.0 实测）：行写入的 single_select 收**选项值**；发选项 ID 会被拒：
+  // `The provided select option value '79' is not a valid select option.`（17/25 条真实身份曾因此写失败）。
+  // 视图过滤仍然需要选项 ID（encodeFilterValue），两者是不同编码。
+  assert.equal(encodeWritePayload(TABLE_VIDEOS, { review_status: 'reviewed' }, meta).review_status, 'reviewed', '有选项元数据时仍发选项值');
   const linkPayload = encodeWritePayload(TABLE_METRICS, { observation_id: 'o1', video_link: [11, 12], status: 'value' }, null);
   assert.deepEqual(linkPayload.video_link, [11, 12], '关联按 ID 数组写入');
   const emptyLink = encodeWritePayload(TABLE_METRICS, { observation_id: 'o1', video_link: [] }, null);
@@ -1725,6 +1735,8 @@ test('R7-STEP2: the real user path never prepares fixtures and preserves pre-exi
     backend, rowId: pre.id, entityKey: pre.entity_key, note: '既有目标侧人工备注（本包之前就存在）',
     reviewer: 'prior-human', classification: { product_category: '手机壳', scene_or_need: '静态产品展示', state: 'reviewed' },
     evidenceRef: 'cards/prior.json#t0',
+    // R9-STEP2.3：复核状态必须**显式请求**才会写；这里显式请求 reviewed（不再是“加备注即 reviewed”）
+    reviewStatus: 'reviewed',
   });
   assert.equal(prior.ok, true, JSON.stringify(prior.checks.filter((c) => !c.ok)));
 
@@ -2105,7 +2117,602 @@ test('R8-STEP4: the delivered CLI runs the whole sequence on ONE persistent isol
   assert.equal(res.assertions.replay_zero_inserts, true, '普通复导入零新增');
   assert.equal(res.assertions.export_read_only, true);
   assert.equal(res.assertions.restore_ok, true);
-  // 同一 store 文件确实被 7 次 CLI 调用共享
+  // 同一 store 文件确实被 8 次 CLI 调用共享
   const store = readStore(storePath);
   assert.equal(store.rows[store.tables.find((t) => t.name === 'Videos').id].length, 25);
+});
+
+// ─────────────── R9：单一写路径 / 诚实写入回执 / 完整快照契约 / 失败即停 ───────────────
+
+test('R9-STEP2: journey is read-only and refuses its legacy --edit before any write', async () => {
+  await withR8Target('r9-journey', async ({ d, storePath, out, cli }) => {
+    assert.equal((await cli(['import', ...r8Base(d), '--limit', '3'])).code, 0);
+    const tableId = readStore(storePath).tables.find((t) => t.name === 'Videos').id;
+    const key = readStore(storePath).rows[tableId][0].entity_key;
+    const before = storeHashOf(storePath);
+
+    // 普通 journey：只读，零写入
+    const ro = await cli(['journey', ...r8Base(d), '--entity-key', key]);
+    assert.equal(ro.code, 0, ro.stdout + ro.stderr);
+    const rt = receiptOf(out, 'journey/journey-transcript.json');
+    assert.equal(rt.read_only, true);
+    assert.equal(rt.writes_performed, 0);
+    assert.equal(rt.writes_attempted, 0);
+    assert.equal(rt.edit_receipt, null);
+    assert.equal(storeHashOf(storePath), before, '只读旅程不得改动目标');
+
+    // 旧 `--edit`：必须在任何写入之前显式拒绝，并指向独立 edit 命令
+    const legacy = await cli(['journey', ...r8Base(d), '--edit', '--entity-key', key, '--note', 'x', '--reviewer', 'op', '--manual-reviewer', 'op']);
+    assert.equal(legacy.code, 16, `legacy --edit 必须被显式拒绝（exit 16），实际 ${legacy.code}: ${legacy.stdout}`);
+    const lr = receiptOf(out, 'journey/journey-transcript.json');
+    assert.equal(lr.ok, false);
+    assert.equal(lr.error, 'journey_edit_removed');
+    assert.equal(lr.writes_attempted, 0);
+    assert.equal(lr.writes_performed, 0);
+    assert.match(JSON.stringify(lr.problems), /journey_no_longer_writes/);
+    assert.equal(storeHashOf(storePath), before, '拒绝路径不得产生任何写入');
+  });
+});
+
+test('R9-STEP2: a note or a proposed classification never claims "reviewed"', async () => {
+  await withR8Target('r9-review', async ({ d, storePath, out, cli }) => {
+    assert.equal((await cli(['import', ...r8Base(d), '--limit', '2'])).code, 0);
+    const tableId = readStore(storePath).tables.find((t) => t.name === 'Videos').id;
+    const key = readStore(storePath).rows[tableId][0].entity_key;
+    const CAT = 'R9类别-不冒充复核';
+
+    // ① 只加备注 + proposed 分类、**不**请求复核状态 → 目标行复核状态保持原值（unreviewed）
+    const e1 = await cli(['edit', ...r8Base(d), '--entity-key', key, '--note', 'R9 备注（不请求复核）', '--reviewer', 'r9-fixture-operator',
+      '--product-category', CAT, '--classification-state', 'proposed', '--classification-evidence', 'cards/r9.json#t0']);
+    assert.equal(e1.code, 0, e1.stdout + e1.stderr);
+    const r1 = receiptOf(out, 'edit/edit-receipt.json');
+    assert.equal(r1.target_row_before.review_status, 'unreviewed');
+    assert.equal(r1.target_row_after.review_status, 'unreviewed', '不得把“加备注/提案”当成已复核');
+    assert.equal(r1.target_row_after.product_category_state, 'proposed', '只写显式请求的分类状态');
+    assert.equal(r1.verification.review_status_expected, true);
+
+    // ② 显式请求 reviewed → 必须落地
+    const e2 = await cli(['edit', ...r8Base(d), '--entity-key', key, '--note', 'R9 显式复核', '--reviewer', 'r9-fixture-operator', '--review-status', 'reviewed']);
+    assert.equal(e2.code, 0, e2.stdout + e2.stderr);
+    const r2 = receiptOf(out, 'edit/edit-receipt.json');
+    assert.equal(r2.target_row_after.review_status, 'reviewed');
+    assert.equal(r2.intended.review_status, 'reviewed');
+    // ③ 非法状态 → 拒绝且零写入
+    const beforeBad = storeHashOf(storePath);
+    const e3 = await cli(['edit', ...r8Base(d), '--entity-key', key, '--note', 'x', '--reviewer', 'op', '--review-status', 'approved']);
+    assert.equal(e3.code, 12);
+    assert.equal(receiptOf(out, 'edit/edit-receipt.json').writes_attempted, 0);
+    assert.equal(storeHashOf(storePath), beforeBad);
+  });
+});
+
+test('R9-STEP2: mutation receipts separate attempted / accepted / confirmed / refused / unknown', async () => {
+  await withR8Target('r9-mutation', async ({ d, storePath, out, cli }) => {
+    assert.equal((await cli(['import', ...r8Base(d), '--limit', '2'])).code, 0);
+    const tableId = readStore(storePath).tables.find((t) => t.name === 'Videos').id;
+    const key = readStore(storePath).rows[tableId][0].entity_key;
+
+    // ① 被拒绝：不得因为“传了意图”就算一次写入
+    const refused = await cli(['edit', ...r8Base(d), '--entity-key', 'TikTok|main|不存在', '--note', 'x', '--reviewer', 'op']);
+    assert.equal(refused.code, 12);
+    const rr = receiptOf(out, 'edit/edit-receipt.json');
+    assert.equal(rr.writes_attempted, 0);
+    assert.equal(rr.writes_performed, 0);
+    assert.equal(rr.mutation.state, 'refused');
+    assert.equal(rr.mutated, false);
+
+    // ② 写入被接受但**读回失败**：必须如实记 uncertain，且不得声称零写入
+    const beforeWrite = storeHashOf(storePath);
+    d.failRowReadsAfter(4);   // 前 4 次行读取（查询/身份/编辑前快照）放行；写入后的复读（第 5 次）失败
+    const unverified = await cli(['edit', ...r8Base(d), '--entity-key', key, '--note', 'R9 写入后读回失败', '--reviewer', 'r9-fixture-operator']);
+    assert.equal(unverified.code, 13, unverified.stdout + unverified.stderr);
+    const ur = receiptOf(out, 'edit/edit-receipt.json');
+    assert.equal(ur.mutation.attempted, true);
+    assert.equal(ur.mutation.write_accepted, true, '写入请求被接受');
+    assert.equal(ur.mutation.readback_ok, false, '读回失败');
+    assert.equal(ur.mutation.confirmed, false);
+    assert.equal(ur.uncertain_outcome, true);
+    assert.equal(ur.writes_performed, 1, '被接受的写入不得被记成 0');
+    assert.equal(ur.ok, false, '未确认不得报成功');
+    assert.notEqual(storeHashOf(storePath), beforeWrite, '该写入确实落到了目标存储（因此不能声称零写入）');
+    assert.equal(readStore(storePath).rows[tableId].find((r) => r.entity_key === key).review_notes, 'R9 写入后读回失败');
+  });
+});
+
+test('R9-STEP3: export rejects conflicting row-id/entity-key and keeps all three classification bases', async () => {
+  await withR8Target('r9-export', async ({ d, storePath, out, cli }) => {
+    assert.equal((await cli(['import', ...r8Base(d), '--limit', '4'])).code, 0);
+    const store = readStore(storePath);
+    const tableId = store.tables.find((t) => t.name === 'Videos').id;
+    const rows = store.rows[tableId];
+    const keyA = rows[0].entity_key, keyB = rows[1].entity_key;
+    const REF = 'cards/r9-export.json#t0';
+    // 三个分类基准各写一次（值/状态/证据/操作者都要能序列化出来）
+    const e = await cli(['edit', ...r8Base(d), '--entity-key', keyB, '--note', 'R9 快照用例', '--reviewer', 'r9-fixture-operator',
+      '--product-category', 'R9类别', '--product-function', 'R9功能', '--scene-or-need', 'R9场景',
+      '--classification-state', 'proposed', '--classification-evidence', REF]);
+    assert.equal(e.code, 0, e.stdout + e.stderr);
+    const er = receiptOf(out, 'edit/edit-receipt.json');
+    for (const base of ['product_category', 'product_function', 'scene_or_need']) {
+      assert.equal(er.target_row_after[base], `R9${base === 'product_category' ? '类别' : base === 'product_function' ? '功能' : '场景'}`);
+      assert.equal(er.target_row_after[`${base}_state`], 'proposed', `${base}_state 必须序列化`);
+      assert.equal(er.target_row_after[`${base}_origin`], 'human_review', `${base}_origin 必须序列化`);
+      assert.equal(er.target_row_after[`${base}_reviewer`], 'r9-fixture-operator', `${base}_reviewer 必须序列化`);
+      assert.equal(er.target_row_after[`${base}_evidence_ref`], REF, `${base}_evidence_ref 必须序列化`);
+    }
+
+    // 冲突选择：row-id 指向 A、entity-key 指向 B → 拒绝，且不得声称导出成功
+    const beforeExport = storeHashOf(storePath);
+    const conflict = await cli(['export', ...r8Base(d), '--row-id', String(rows[0].id), '--entity-key', keyB]);
+    assert.equal(conflict.code, 14, conflict.stdout + conflict.stderr);
+    const cr = receiptOf(out, 'portable/export-receipt.json');
+    assert.equal(cr.ok, false);
+    assert.equal(cr.selected_row_id, null);
+    assert.equal(cr.selection.both_supplied, true);
+    assert.equal(cr.selection.consistent, false);
+    assert.ok(cr.problems.some((p) => String(p).startsWith('conflicting_selection')), JSON.stringify(cr.problems));
+    assert.equal(storeHashOf(storePath), beforeExport, '拒绝的导出不得改动目标');
+
+    // 一致选择：两者指向同一行 → 通过且 selection.consistent=true
+    const consistent = await cli(['export', ...r8Base(d), '--row-id', String(rows[1].id), '--entity-key', keyB]);
+    assert.equal(consistent.code, 0, consistent.stdout + consistent.stderr);
+    const okr = receiptOf(out, 'portable/export-receipt.json');
+    assert.equal(okr.selection.consistent, true);
+    assert.equal(okr.selected_entity_key, keyB);
+    assert.equal(okr.selected_row_id, rows[1].id);
+    // 快照里的选中行必须带全三个分类基准
+    const bundle = JSON.parse(fs.readFileSync(okr.bundle_path, 'utf8'));
+    for (const base of ['product_category', 'product_function', 'scene_or_need']) {
+      assert.equal(bundle.snapshot.selected_row[base], `R9${base === 'product_category' ? '类别' : base === 'product_function' ? '功能' : '场景'}`);
+      assert.equal(bundle.snapshot.selected_row[`${base}_evidence_ref`], REF);
+    }
+  });
+});
+
+test('R9-STEP3: restore fails on wrong link identity, counts mismatch and missing provenance', async () => {
+  await withR8Target('r9-restore-neg', async ({ d, storePath, out, cli }) => {
+    assert.equal((await cli(['import', ...r8Base(d), '--limit', '6'])).code, 0);
+    const store = readStore(storePath);
+    const tableId = store.tables.find((t) => t.name === 'Videos').id;
+    const segTableId = store.tables.find((t) => t.name === 'Segments').id;
+    const segKeys = new Set(store.rows[segTableId].map((s) => s.entity_key));
+    const key = (store.rows[tableId].find((r) => segKeys.has(r.entity_key)) ?? store.rows[tableId][0]).entity_key;
+    const REF = 'cards/r9-restore.json#t0';
+    assert.equal((await cli(['edit', ...r8Base(d), '--entity-key', key, '--note', 'R9 恢复负例', '--reviewer', 'r9-fixture-operator',
+      '--product-category', 'R9类别', '--product-function', 'R9功能', '--scene-or-need', 'R9场景',
+      '--classification-state', 'proposed', '--classification-evidence', REF])).code, 0);
+    assert.equal((await cli(['export', ...r8Base(d), '--entity-key', key])).code, 0);
+    const okr = receiptOf(out, 'portable/export-receipt.json');
+    const original = fs.readFileSync(okr.bundle_path);
+    const originalSha = crypto.createHash('sha256').update(original).digest('hex');
+    // 正例仍通过（且不误报）
+    assert.equal((await cli(['restore', '--bundle', okr.bundle_path, '--restore-into', path.join(out, 'r9-restore-ok')])).code, 0);
+    assert.equal(receiptOf(out, 'restore/restore-receipt.json').ok, true);
+
+    const writeMutant = (name, fn) => {
+      const p = path.join(out, `r9-bundle-${name}.json`);
+      const b = JSON.parse(original.toString('utf8'));
+      fn(b);
+      fs.writeFileSync(p, JSON.stringify(b, null, 1), 'utf8');
+      return p;
+    };
+    const otherVideoRel = store.rows[tableId].find((r) => r.entity_key !== key);
+    const cases = [
+      ['missing_provenance', writeMutant('missing_provenance', (b) => {
+        const r = b.data.Videos.find((x) => x.entity_key === key);
+        r.product_function_origin = null; r.product_function_evidence_ref = null;
+      }), 'selected_row_field_mismatch'],
+      ['wrong_link_identity', writeMutant('wrong_link_identity', (b) => {
+        // 把选中身份某片段的 video_link 指向**另一个真实存在**的视频行 ID
+        const other = b.data.Videos.find((x) => x.entity_key !== key);
+        const s = b.data.Segments.find((x) => x.entity_key === key);
+        if (s && other) s.video_link = [other.id];
+      }), 'relation_target_identity_mismatch'],
+      ['counts_mismatch', writeMutant('counts_mismatch', (b) => {
+        b.data['Metric observations'] = b.data['Metric observations'].slice(0, 1);   // 键集合与计数同时变
+      }), 'table_key_set_mismatch'],
+      ['missing_function_value', writeMutant('missing_function_value', (b) => {
+        const r = b.data.Videos.find((x) => x.entity_key === key);
+        r.product_function = null;
+      }), 'selected_row_field_mismatch'],
+    ];
+    for (const [name, p, expectedId] of cases) {
+      const mutatedSha = crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex');
+      assert.notEqual(mutatedSha, originalSha, `${name}: 负例必须用改动后的磁盘字节`);
+      const r = await cli(['restore', '--bundle', p, '--restore-into', path.join(out, `r9-restore-${name}`)]);
+      assert.equal(r.code, 15, `${name}: 应显式失败，实际 ${r.code}`);
+      const rr = receiptOf(out, 'restore/restore-receipt.json');
+      assert.equal(rr.ok, false, `${name}: 不得报成功`);
+      assert.equal(rr.bundle_sha256, mutatedSha, `${name}: 必须报告改动后的哈希`);
+      assert.ok(rr.findings.some((f) => f.id === expectedId), `${name}: 期望 ${expectedId}，实际 ${JSON.stringify(rr.findings.map((f) => f.id))}`);
+    }
+  });
+});
+
+test('R9-STEP4: a failed early step blocks dependent CLI steps (fail-stop) and the journey mismatch cannot write', async () => {
+  // ① 失败即停：首步导入用**不存在的 manifest** → 后续步骤不得继续执行
+  const storePath = path.join(mkFixtureDir('ml-r9-failstop-'), 'store.json');
+  const outRoot = path.join(path.dirname(storePath), 'out');
+  const res = await runDeliveredSequence({
+    root: W_ROOT, cliPath: R8_CLI, storePath, outRoot,
+    manifestPath: path.join(outRoot, 'does-not-exist-manifest.json'),
+    entityKey: 'TikTok|main|7679078728667778337', classification: 'R9类别', evidenceRef: 'cards/x.json#t0',
+  });
+  assert.equal(res.ok, false);
+  assert.equal(res.assertions.all_steps_exit_zero, false);
+  assert.equal(res.assertions.no_blocked_steps, false, '失败的步骤必须阻断后续步骤');
+  assert.ok(res.blocked.length >= 5, `后续步骤应被标记阻断：${JSON.stringify(res.blocked)}`);
+  assert.equal(fs.existsSync(path.join(outRoot, 'edit', 'edit-receipt.json')), false, '前置失败后不得产生编辑回执');
+  assert.equal(fs.existsSync(path.join(outRoot, 'portable', 'export-receipt.json')), false, '前置失败后不得导出');
+
+  // ② 原错配形状：journey 的查询**没有命中**时，也不得经由任何写路径改动目标
+  await withR8Target('r9-mismatch', async ({ d, storePath: sp, out, cli }) => {
+    assert.equal((await cli(['import', ...r8Base(d), '--limit', '2'])).code, 0);
+    const before = storeHashOf(sp);
+    const j = await cli(['journey', ...r8Base(d), '--product-category', '不可能命中的类别-R9']);
+    const jr = receiptOf(out, 'journey/journey-transcript.json');
+    assert.equal(jr.writes_performed, 0);
+    assert.equal(jr.writes_attempted, 0);
+    assert.equal(jr.hit_count, 0, '未命中必须诚实为 0');
+    assert.equal(storeHashOf(sp), before, '未命中的只读旅程不得改动目标');
+    // 独立 edit 的查询维度（--query-*）与写入内容分离：内容标志不会被当成查询条件
+    const tableId = readStore(sp).tables.find((t) => t.name === 'Videos').id;
+    const key = readStore(sp).rows[tableId][0].entity_key;
+    const e = await cli(['edit', ...r8Base(d), '--entity-key', key, '--note', 'R9 内容≠查询', '--reviewer', 'r9-fixture-operator',
+      '--product-category', '全新类别-R9', '--classification-evidence', 'cards/r9-content.json#t0']);
+    assert.equal(e.code, 0, e.stdout + e.stderr);
+    assert.equal(receiptOf(out, 'edit/edit-receipt.json').selected_entity_key, key);
+  });
+});
+
+// ---------------------------------------------------------------- R11：真实 Baserow 2.4 适配的聚焦回归
+// 每条都对应本轮真实实例上**实测到的**一次 400/误判，不是凭空补的断言。
+test('R11-A: 行写入的 single_select 发选项值，不发选项 ID（2.4 实测：发 ID 被 400 拒绝）', () => {
+  const meta = {
+    review_status: { select_options: [{ id: 3919, value: 'unreviewed' }] },
+    entity_source_state: { select_options: [{ id: 3916, value: 'observed' }] },
+  };
+  const payload = encodeWritePayload(TABLE_VIDEOS, {
+    entity_key: 'P|main|1', review_status: 'unreviewed', entity_source_state: 'observed',
+  }, meta);
+  assert.equal(payload.review_status, 'unreviewed', '必须发选项值');
+  assert.equal(payload.entity_source_state, 'observed', '必须发选项值');
+  assert.equal(JSON.stringify(payload).includes('3919'), false, '不得把选项 ID 当作行写入值');
+});
+
+test('R11-B: 浮点噪声收敛到 6 位小数；url 字段只放绝对地址并原样保留来源文本', () => {
+  const rec = {
+    entity_key: 'P|main|1', platform: 'P', namespace: 'main', native_id: '1', branch: 'main', aid_branch: false,
+    evidence_fingerprint: 'fp',
+    identity: { canonical_url: 'https://e.com/a', derived_permalink: 'DddloSbTQoI', duration_seconds: 0.6110000000000001, author_follower_count: 3 },
+    classification: {}, availability: { entity_source_state: 'observed', fields_observed: 1 },
+    provenance: {}, metrics: [], ratios: [], assets: [],
+    review: { status: 'unreviewed', notes: [], human_value_categories: [] },
+  };
+  const rows = rowsOf([rec]);
+  assert.equal(rows[TABLE_VIDEOS][0].duration_seconds, 0.611, '浮点噪声必须收敛');
+  assert.equal(rows[TABLE_VIDEOS][0].canonical_url, 'https://e.com/a', '绝对地址保留在 url 字段');
+  assert.equal(rows[TABLE_VIDEOS][0].derived_permalink, null, '裸 ID 不得塞进 url 字段');
+  assert.equal(rows[TABLE_VIDEOS][0].derived_permalink_recorded, 'DddloSbTQoI', '来源原样值必须保留');
+});
+
+test('R11-C: number 字段读回字符串与写入意图按数值语义比较；文本仍按字面比较', () => {
+  assert.equal(logicalEqual(7.334, '7.334000'), true, '读回 "7.334000" 与意图 7.334 视为相同');
+  assert.equal(logicalEqual(0.611, '0.611'), true);
+  assert.equal(logicalEqual(7.334, '7.335'), false, '不同数值仍判为不同');
+  assert.equal(logicalEqual('abc', 'abc'), true);
+  assert.equal(logicalEqual('7.334', '7.334000'), false, '两个字符串仍按字面比较（不变更既有语义）');
+  assert.equal(logicalEqual('7.334abc', 7.334), false, '含非数字字符的字符串不得按数值比较');
+});
+
+test('R11-D: 空主键占位行不参与重复判定但如实登记；真实重复仍被拦下', () => {
+  const receipt = { target_duplicates: [], errors: [] };
+  const dups = detectDuplicateTargetKeys({
+    table: TABLE_VIDEOS, source: 'pre_write_readback', receipt,
+    rows: [{ id: 1, entity_key: '' }, { id: 2, entity_key: '' }, { id: 3, entity_key: 'a' }, { id: 4, entity_key: 'b' }],
+  });
+  assert.equal(dups.length, 0, '空主键占位行不得触发重复告警');
+  assert.equal(receipt.empty_primary_key_rows.length, 1);
+  assert.equal(receipt.empty_primary_key_rows[0].row_count, 2);
+  assert.deepEqual(receipt.empty_primary_key_rows[0].row_ids, [1, 2], '必须如实登记行 ID');
+
+  const receipt2 = { target_duplicates: [], errors: [] };
+  const dup2 = detectDuplicateTargetKeys({
+    table: TABLE_VIDEOS, source: 'pre_write_readback', receipt: receipt2,
+    rows: [{ id: 9, entity_key: 'x' }, { id: 10, entity_key: 'x' }, { id: 11, entity_key: '' }],
+  });
+  assert.equal(dup2.length, 1, '真实重复仍必须拦下');
+  assert.equal(receipt2.errors[0].error_code, 'duplicate_target_primary_key');
+});
+
+test('R11-E: 既有字段选项不足时按真实 API 补齐（number_decimal_places / date_include_time）', async () => {
+  const plan = planSchema().tables.find((t) => t.name === TABLE_VIDEOS);
+  const existing = plan.fields.map((f, i) => ({
+    id: i + 1, name: f.name, type: f.type, primary: f.primary === true,
+    number_decimal_places: f.type === 'number' ? 0 : undefined,
+    date_include_time: f.type === 'date' ? false : undefined,
+  }));
+  const updates = [];
+  const client = {
+    listTablesInDatabase: async () => [{ id: 700, name: TABLE_VIDEOS, database_id: 1 }],
+    listFields: async () => existing,
+    updateField: async (id, patch) => { updates.push({ id, patch }); return { ...patch, id }; },
+    createField: async () => { throw new Error('r11_e_must_not_create_field'); },
+    createTable: async () => { throw new Error('r11_e_must_not_create_table'); },
+    listViews: async () => [],
+    createView: async () => { throw new Error('r11_e_must_not_create_view'); },
+    listViewFilters: async () => [],
+    listViewSortings: async () => [],
+  };
+  const res = await ensureSchemaAndViews(client, { schema: { tables: [plan] }, views: [], databaseId: 1 });
+  assert.equal(res.ok, true);
+  const repaired = res.log.fields_repaired.map((r) => `${r.name}:${JSON.stringify(r.patch)}`);
+  assert.ok(repaired.includes('duration_seconds:{"number_decimal_places":6}'), `应补齐小数位：${JSON.stringify(repaired)}`);
+  assert.ok(repaired.includes('review_reviewed_at:{"date_include_time":true}'), `应补齐含时间：${JSON.stringify(repaired)}`);
+  assert.equal(updates.length, repaired.length);
+  assert.equal(repaired.some((x) => x.startsWith('publish_date_epoch_s')), false, '整数时间戳不得被无谓改写');
+});
+
+test('R11-F: CLI 凭据文件输入生效，且令牌值不进入 argv 回显/输出', async () => {
+  const tmp = mkFixtureDir('ml-r11-creds-');
+  const credsPath = path.join(tmp, 'creds.json');
+  const DB_TOKEN = 'r11-db-token-must-not-appear';
+  const MGMT = 'r11-jwt-must-not-appear';
+  fs.writeFileSync(credsPath, JSON.stringify({ base_url: 'http://127.0.0.1:9', database_id: 1, db_token: DB_TOKEN, jwt: MGMT }));
+  const res = await runCli({
+    cliPath: R8_CLI, root: W_ROOT,
+    args: ['query', '--target', 'http', '--creds-file', credsPath, '--out', path.join(tmp, 'out')],
+    env: {}, timeoutMs: 60000,
+  });
+  const combined = `${res.stdout}\n${res.stderr}`;
+  assert.equal(combined.includes(DB_TOKEN), false, '数据库令牌值不得出现在输出中');
+  assert.equal(combined.includes(MGMT), false, 'JWT 值不得出现在输出中');
+  assert.equal(/target_http_requires_base_url_and_token/.test(combined), false, 'base-url/token 应由凭据文件补齐');
+});
+
+// R12 第 8 批复核 R8-3 回归：子行引用的父键是**空字符串**时，旧实现直接跳过该关联字段、
+// 把子行无声写成“孤儿”，写后对账又因父键为空跳过关系核对 → 最终 ok=true。
+// 修复后必须**阻断该子行并报错**（link_parent_key_empty），不得算作成功。
+test('R12-M3-C: 空父键不得静默写成孤儿行（R8-3）', async () => {
+  const seg = {
+    segment_id: 'TikTok|main|1|0|0', index: 0, t_label: '00:00.000', start_seconds: 0,
+    observed: '俯拍静态产品镜头', onscreen_text: null, speech: null,
+    kind: 'original_fact', fact_origin: 'source_fact',
+    origin_card: 'cards/tiktok-1.json', origin_method: 'per_tile_exact_seek',
+    time_accuracy_note: '帧选取层 ≤1 帧间隔', coverage: 'sparse_sampled_tiles_only',
+    review_status: 'unreviewed', selected_reference: false, human_note: null,
+  };
+  // 资产键被置空 → 该资产无法被绑定，其片段引用的 asset_id 也是空字符串
+  const rec = normalizeEntity(entity(), [], {
+    mediaIndex: new Map([['TikTok|main|7677920051269455125', {
+      asset_id: '', platform: 'TikTok', native_id: '7677920051269455125', cohort: 'test',
+      local_path: 'D:/abs/a.mp4', media_kind: 'video', usable_as_video: true,
+      segments: [seg], segment_count: 1,
+    }]]),
+  });
+  assert.equal(rec.assets.length, 1);
+  const backend = createMemoryBackend();
+  for (const t of ALL_TABLES) await backend.createTable(t);
+  const receipt = await importRecords({ records: [rec], backend, mode: 'test' });
+
+  const segRows = backend.listRows(TABLE_SEGMENTS);
+  assert.equal(segRows.length, 0, `空父键的子行不得被写成孤儿：${JSON.stringify(segRows.map((r) => r.asset_link ?? null))}`);
+  const codes = (receipt.errors ?? []).map((e) => e.error_code);
+  assert.ok(codes.includes('link_parent_key_empty'), `必须给出明确错误码 link_parent_key_empty，实际 ${JSON.stringify(codes)}`);
+  assert.equal(receipt.ok, false, '存在空父键阻断时不得报 ok=true');
+  // 反例另一侧：源里**本来就没有**该父键（字段不存在）→ 合法，不建立关联、也不报错
+  const recNoAssetField = normalizeEntity(entity(), [], {
+    mediaIndex: new Map([['TikTok|main|7677920051269455125', {
+      platform: 'TikTok', native_id: '7677920051269455125', cohort: 'test',
+      local_path: 'D:/abs/a.mp4', media_kind: 'video', usable_as_video: true,
+      segments: [seg], segment_count: 1,
+    }]]),
+  });
+  const backend2 = createMemoryBackend();
+  for (const t of ALL_TABLES) await backend2.createTable(t);
+  const receipt2 = await importRecords({ records: [recNoAssetField], backend: backend2, mode: 'test' });
+  assert.equal((receipt2.errors ?? []).some((e) => e.error_code === 'link_parent_key_empty'), false, '字段缺失不等于空值，不得误报');
+});
+
+
+// 旧写法一律用 entity_key，会把同一视频下**其它资产**的片段也算进当前资产的反向集合 → 合法关系被误判。
+test('R12-M3-B: 反向关系按父表取键（Assets 用 asset_id），同一视频的多个资产不互相串味', () => {
+  assert.equal(parentRelationKeyField(TABLE_VIDEOS), 'entity_key');
+  assert.equal(parentRelationKeyField(TABLE_ASSETS), 'asset_id');
+  assert.equal(parentRelationKeyField(TABLE_SEGMENTS), null);
+
+  // 同一视频 v1 下两个资产 a1/a2，各有自己的片段；bindings 记录片段行 ID
+  const segments = [
+    { entity_key: 'v1', asset_id: 'a1' }, { entity_key: 'v1', asset_id: 'a1' },
+    { entity_key: 'v1', asset_id: 'a2' },
+  ];
+  const bindings = { [TABLE_SEGMENTS]: { 'v1|a1|s1': 101, 'v1|a1|s2': 102, 'v1|a2|s3': 201 } };
+  const childRows = [
+    { entity_key: 'v1', asset_id: 'a1', segment_id: 'v1|a1|s1' },
+    { entity_key: 'v1', asset_id: 'a1', segment_id: 'v1|a1|s2' },
+    { entity_key: 'v1', asset_id: 'a2', segment_id: 'v1|a2|s3' },
+  ];
+  const forA1 = reverseRelationExpectedIds({ parentTable: TABLE_ASSETS, parentRow: { asset_id: 'a1' }, childTable: TABLE_SEGMENTS, childRows, bindings, childPrimaryKey: 'segment_id' });
+  const forA2 = reverseRelationExpectedIds({ parentTable: TABLE_ASSETS, parentRow: { asset_id: 'a2' }, childTable: TABLE_SEGMENTS, childRows, bindings, childPrimaryKey: 'segment_id' });
+  assert.deepEqual(forA1, ['101', '102'], 'a1 只应包含自己的片段（旧写法会把 a2 的 201 也算进来）');
+  assert.deepEqual(forA2, ['201']);
+
+  // Videos 侧仍按 entity_key 归集（该视频下所有子行）
+  const forV = reverseRelationExpectedIds({ parentTable: TABLE_VIDEOS, parentRow: { entity_key: 'v1' }, childTable: TABLE_SEGMENTS, childRows, bindings, childPrimaryKey: 'segment_id' });
+  assert.deepEqual(forV, ['101', '102', '201']);
+  // 父键为空 / 父表无键字段 → 不得凭空空转成“通过”
+  assert.deepEqual(reverseRelationExpectedIds({ parentTable: TABLE_VIDEOS, parentRow: { entity_key: '' }, childTable: TABLE_SEGMENTS, childRows, bindings, childPrimaryKey: 'segment_id' }), []);
+  assert.deepEqual(reverseRelationExpectedIds({ parentTable: TABLE_SEGMENTS, parentRow: { entity_key: 'v1' }, childTable: TABLE_METRICS, childRows, bindings, childPrimaryKey: 'segment_id' }), []);
+  assert.equal(segments.length, 3);
+});
+
+// R12/M3 第 6 批复核 R6-1 回归：真实 Baserow 行接口会在父行上返回**反向** link_row 字段
+// （子行写入后自动出现）。内存替身默认不模拟这一行为，故这里在**读取时**按实测字段名合成，
+// 以便复现“已存在的视频行 + 本轮补齐子行 → 反向 link 从空变非空”这一原始故障场景。
+const withReverseLinks = (inner) => ({
+  ...inner,
+  async listAllRows(name) {
+    const rows = await inner.listAllRows(name);
+    const reverse = REVERSE_LINK_FIELDS[name] ?? {};
+    if (!Object.keys(reverse).length) return rows;
+    return rows.map((r) => {
+      const out = { ...r };
+      const childPk = (t) => TABLE_PRIMARY_KEY[t];
+      for (const [field, childTable] of Object.entries(reverse)) {
+        const forward = Object.entries(LINK_FIELDS[childTable] ?? {}).find(([, target]) => target === name)?.[0];
+        const kids = forward
+          ? inner.listRows(childTable).filter((c) => {
+            const v = c[forward];
+            return Array.isArray(v) ? v.map(String).includes(String(r.id)) : String(v) === String(r.id);
+          })
+          : [];
+        out[field] = kids.map((c) => ({ id: c.id, value: String(c[childPk(childTable)]), order: String(c.id) }));
+      }
+      return out;
+    });
+  },
+});
+
+test('R12-M3-A: 反向 link 顺序产物不判为不符（含已存在父行+本轮补齐子行），真实不符仍拦下', async () => {
+  // ① 适用范围：Videos 的反向 link 字段必须被认得。
+  //    旧版只查 LINK_FIELDS，而 Videos 在 LINK_FIELDS 里是空集 → 豁免从未生效（第 6 批复核 R6-1）。
+  assert.deepEqual([...linkFieldNames(TABLE_VIDEOS)].sort(), ['Assets', 'Metric observations', 'Ratios', 'Segments']);
+  assert.ok(linkFieldNames(TABLE_RATIOS).includes('video_link'), '正向字段仍须纳入');
+
+  // ② 判定语义：只豁免“意图为空、实际非空”的 link 形状
+  const vLinks = linkFieldNames(TABLE_VIDEOS);
+  const artifact = { field: 'Ratios', wanted: [], actual: [{ id: 30, value: 'x', order: '30' }] };
+  assert.equal(isIgnorableLinkOrderArtifact(artifact, vLinks), true);
+  assert.equal(isIgnorableLinkOrderArtifact(artifact, []), true, '未列名但形状是 link 数组 → 兜底豁免');
+  assert.equal(isIgnorableLinkOrderArtifact({ field: 'Ratios', wanted: [{ id: 30 }], actual: [{ id: 31 }] }, vLinks), false, '意图有值却对不上 → 仍计为不符');
+  assert.equal(isIgnorableLinkOrderArtifact({ field: 'review_notes', wanted: null, actual: 'x' }, vLinks), false, '非 link 字段不得豁免');
+  assert.equal(isIgnorableLinkOrderArtifact({ field: 'Ratios', wanted: [], actual: [] }, vLinks), false);
+  assert.equal(isLinkShaped([{ id: 1 }]), true);
+  assert.equal(isLinkShaped([7, 8]), true);
+  assert.equal(isLinkShaped([]), false);
+  assert.equal(isLinkShaped([{ foo: 1 }]), false);
+  assert.equal(isLinkShaped('x'), false);
+
+  // ③ 原始故障场景：先只写视频行（反向 link 为空），再用完整记录在本轮补齐子行
+  const bare = [normalizeEntity(entity(), [])];
+  const full = [normalizeEntity(entity(), [fieldRow('engagement_like', 'present_and_usable', 7)])];
+  const inner = createMemoryBackend();
+  for (const t of ALL_TABLES) await inner.createTable(t);
+  const backend = withReverseLinks(inner);
+  await importRecords({ records: bare, backend, mode: 'test' });
+  const videoRowId = inner.listRows(TABLE_VIDEOS)[0].id;
+  // 模拟真实中断状态（run1：Videos 50/50 已写、Ratios 0/50 未写）：删掉本轮之前写入的比率子行，
+  // 使视频行的反向 link 在**本轮开始时**为空，而本轮补齐子行后会变成非空。
+  for (const r of inner.listRows(TABLE_RATIOS)) inner.deleteRow(TABLE_RATIOS, String(r[TABLE_PRIMARY_KEY[TABLE_RATIOS]]));
+  assert.equal(inner.listRows(TABLE_RATIOS).length, 0, '前置：本轮开始时没有比率子行');
+  const before = (await backend.listAllRows(TABLE_VIDEOS))[0];
+  const nonEmptyBefore = Object.keys(REVERSE_LINK_FIELDS[TABLE_VIDEOS]).filter((f) => (before[f] ?? []).length > 0);
+  assert.deepEqual(nonEmptyBefore, [], `前置：视频行反向 link 应为空，实际 ${JSON.stringify(nonEmptyBefore)}`);
+
+  const receipt = await importRecords({ records: full, backend, mode: 'test' });
+  const after = (await backend.listAllRows(TABLE_VIDEOS))[0];
+  const filledNow = Object.keys(REVERSE_LINK_FIELDS[TABLE_VIDEOS]).filter((f) => (after[f] ?? []).length > 0);
+  assert.ok(filledNow.length > 0, `本轮补齐的子行必须在视频行上生成反向 link：${JSON.stringify(after)}`);
+
+  const v = receipt.post_write_reconciliation[TABLE_VIDEOS];
+  assert.equal(v.field_mismatches.length, 0, `反向 link 顺序产物不得计为不符：${JSON.stringify(v.field_mismatches.slice(0, 1))}`);
+  assert.equal(receipt.ok, true, `已存在父行经本轮补齐后不得把 ok 判成 false：${JSON.stringify(v.field_mismatches.slice(0, 1))}`);
+  assert.deepEqual([...v.link_field_names_checked].sort(), ['Assets', 'Metric observations', 'Ratios', 'Segments'], '回执须显式登记本轮核对过的 link 字段名');
+  assert.deepEqual([...v.reverse_link_fields_excluded_from_field_compare].sort(), ['Assets', 'Metric observations', 'Ratios', 'Segments'], '反向字段必须显式登记为“不参与逐字段比较”');
+  assert.equal(v.relation_mismatches.length, 0, `反向关系必须按目标 id 集合核对通过：${JSON.stringify(v.relation_mismatches.slice(0, 1))}`);
+  assert.equal(v.relation_checks_skipped, 0, '父行已绑定时不得出现被跳过的关系核对');
+  assert.equal(inner.listRows(TABLE_VIDEOS).length, 1, '不得重复插入视频行');
+  assert.equal(inner.listRows(TABLE_VIDEOS)[0].id, videoRowId);
+});
+
+// ─────────────── P0：面板列表卡片化（关键数字 / 业务词 / 行业优先级排序） ───────────────
+// 口径来源＝tools/material-library/panel-metrics.mjs（服务端与前端共用同一份规则）。
+test('P0 列表关键数字：只认「真实观测」，缺失显示「—」而不是 0', () => {
+  const obs = [
+    { entity_key: 'K1', field: 'engagement_play', status: 'value', numeric_value: '1200.000000', value_text: '1200', observed_at_epoch_s: '100' },
+    { entity_key: 'K1', field: 'engagement_play', status: 'value', numeric_value: '1500.000000', value_text: '1500', observed_at_epoch_s: '200' },
+    { entity_key: 'K1', field: 'engagement_play', status: 'absent', numeric_value: null, value_text: '', observed_at_epoch_s: '300' },
+    { entity_key: 'K1', field: 'engagement_like', status: 'observed_zero', numeric_value: '0.000000', value_text: '0', observed_at_epoch_s: '250' },
+    { entity_key: 'K1', field: 'engagement_comment', status: 'unusable', numeric_value: '9.000000', value_text: '9', observed_at_epoch_s: '260' },
+  ];
+  assert.equal(isRealObservation(obs[2]), false, 'absent 不得算真实观测');
+  assert.equal(isRealObservation(obs[3]), true, 'observed_zero 是真实观测（0 也是结论）');
+  const idx = indexLatestRealMetrics(obs);
+  const m = keyMetricsOf(idx, 'K1');
+  assert.equal(m.engagement_play.value, 1500, '最新的真实观测（epoch 200）胜出，晚到的 absent 不得覆盖');
+  assert.equal(m.engagement_play.display, '1500');
+  assert.equal(m.engagement_like.value, 0);
+  assert.equal(m.engagement_like.display, '0', '真实观测到的 0 必须显示 0');
+  assert.equal(m.engagement_comment.value, null, 'unusable 不得当成有值');
+  assert.equal(m.engagement_comment.display, '—', '缺失显示「—」，不得显示 0');
+  assert.equal(keyMetricsOf(idx, '不存在的身份').engagement_play.display, '—');
+  assert.equal(countRealObservations(obs, 'K1'), 3, '真实观测条数＝value/observed_zero 的条数');
+  assert.equal(metricNumber({ numeric_value: null, value_text: '77' }), 77, 'numeric_value 缺失时退回 value_text');
+});
+
+test('P0 列表关键数字：显示格式（万级折算、0 与缺失区分）', () => {
+  assert.equal(formatMetricValue(null), '—');
+  assert.equal(formatMetricValue(0), '0');
+  assert.equal(formatMetricValue(999), '999');
+  assert.equal(formatMetricValue(123456), '12.3万');
+  assert.equal(formatMetricValue(100000), '10万');
+});
+
+test('P0 业务词：实现词不得出现在界面词表里', () => {
+  assert.equal(reviewStatusTerm('unreviewed'), '待人工复核');
+  assert.equal(reviewStatusTerm('in_review'), '复核中');
+  assert.equal(reviewStatusTerm('reviewed'), '通过');
+  assert.equal(reviewStatusTerm('rejected'), '排除');
+  assert.equal(reviewStatusTerm(''), '待人工复核');
+  assert.equal(sourceStateTerm('observed'), '来源正常');
+  assert.equal(sourceStateTerm('source_unavailable'), '采集不到来源');
+  assert.equal(sourceStateTerm('unknown'), '来源待确认');
+  assert.equal(sourceStateTerm(''), '来源待确认');
+  for (const { field, label } of KEY_METRIC_FIELDS) {
+    assert.ok(!/_/.test(label), `关键数字的业务词不得含下划线：${label}`);
+    assert.ok(/^[a-z_]+$/.test(field), `字段名应为库内字段：${field}`);
+  }
+});
+
+test('P0 标题：没有标题字段时按业务读法拼，绝不吐身份主键', () => {
+  const withCat = businessTitleOf({ product_category: '磁吸功能壳', platform: 'TikTok', author_display_name: 'case_lab', publish_date_epoch_s: 1789992790 }, { key: 'TikTok|main|7687749923823013133' });
+  assert.equal(withCat.title, '磁吸功能壳');
+  assert.equal(withCat.basis, '人工分类');
+  const unknownCat = businessTitleOf({ product_category: '未知', platform: 'Xiaohongshu', author_display_name: '土豆爱临平', publish_date_epoch_s: 1789992790 }, { key: 'Xiaohongshu|main|6ab11f5600000000340179fa' });
+  assert.ok(!unknownCat.title.includes('Xiaohongshu|'), '标题里不得出现身份主键');
+  assert.ok(unknownCat.title.includes('Xiaohongshu') && unknownCat.title.includes('土豆爱临平'), `应含平台与账号：${unknownCat.title}`);
+  assert.equal(unknownCat.basis, '平台/账号/日期（无标题字段）');
+  const empty = businessTitleOf({}, { key: 'YouTube|main|zGdPq7WhDOA' });
+  assert.equal(empty.title, '素材 zGdPq7WhDOA'.replace('zGdPq7WhDOA', shortKey('YouTube|main|zGdPq7WhDOA')), '完全无信息时应给可读短编号');
+  assert.equal(shortKey('TikTok|main|7687749923823013133'), 'TikTok-013133');
+});
+
+test('P0 默认排序＝行业优先级（分档 → 有本地视频 → 播放量 → 片段 → 观测数 → 时间）', () => {
+  const mk = (o) => Object.assign({ key: 'k', tier: null, has_playable_media: false, segment_count: 0, metrics_observed: 0, publish_epoch_s: 0, key_metrics: { engagement_play: { value: null } } }, o);
+  const t4 = mk({ key: 'T4', tier: 'T4 低信息量', key_metrics: { engagement_play: { value: 999999 } } });
+  const t3 = mk({ key: 'T3', tier: 'T3 标准证据', key_metrics: { engagement_play: { value: 10 } } });
+  const t2low = mk({ key: 'T2LOW', tier: 'T2 证据充分', key_metrics: { engagement_play: { value: 5 } } });
+  const t2high = mk({ key: 'T2HIGH', tier: 'T2 证据充分', key_metrics: { engagement_play: { value: 500 } } });
+  const t1 = mk({ key: 'T1', tier: 'T1 有本地视频', has_playable_media: true, key_metrics: { engagement_play: { value: 1 } } });
+  const none = mk({ key: 'NONE' });
+  const order = sortByIndustryPriority([t4, t3, t2low, t2high, t1, none]).map((x) => x.key);
+  assert.deepEqual(order, ['T1', 'T2HIGH', 'T2LOW', 'T3', 'T4', 'NONE'], `排序应体现行业优先级，实际 ${order.join('>')}`);
+  // 同档、同播放量时：有片段/观测多的在前
+  const a = mk({ key: 'A', tier: 'T3 标准证据', segment_count: 0, metrics_observed: 3, key_metrics: { engagement_play: { value: 7 } } });
+  const b = mk({ key: 'B', tier: 'T3 标准证据', segment_count: 2, metrics_observed: 9, key_metrics: { engagement_play: { value: 7 } } });
+  assert.deepEqual(sortByIndustryPriority([a, b]).map((x) => x.key), ['B', 'A']);
+  // 回归（P0 验收实测发现）：没有播放量 ≠ 播放量 0 —— 无量必须排在真实 0 之后
+  const noData = mk({ key: 'NODATA', tier: 'T3 标准证据', key_metrics: { engagement_play: { value: null } } });
+  const realZero = mk({ key: 'ZERO', tier: 'T3 标准证据', key_metrics: { engagement_play: { value: 0 } } });
+  assert.deepEqual(sortByIndustryPriority([noData, realZero]).map((x) => x.key), ['ZERO', 'NODATA'], '无播放量的素材不得排在观测到的 0 前面');
+  assert.deepEqual(sortByIndustryPriority([realZero, noData]).map((x) => industryPriorityKey(x)[2]), [0, Number.POSITIVE_INFINITY]);
+});
+
+test('P0 分档字段选项与代码/证据一致（防 schema 与界面漂移）', () => {
+  const p = path.join(W_ROOT, 'outputs', 'product-material-library-phase1-20261006', 'evidence', 'r12-panel-p0-add-tier-field.json');
+  if (!fs.existsSync(p)) return; // 证据不在时不误报（该断言只在工作区内运行时生效）
+  const j = JSON.parse(fs.readFileSync(p, 'utf8'));
+  const opts = (j.field?.options ?? []).slice().sort();
+  assert.deepEqual(opts, ['T1 有本地视频', 'T2 证据充分', 'T3 标准证据', 'T4 低信息量'].sort(), '分档字段选项必须与代码使用的档位串一致');
+  assert.equal(j.value_tier_present_after, true, '分档字段必须已在 Videos 表建立');
 });

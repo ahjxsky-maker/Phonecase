@@ -23,6 +23,8 @@ export const HUMAN_FIELDS = [
   'product_category_reviewer', 'product_function_reviewer', 'scene_or_need_reviewer',
   'product_category_evidence_ref', 'product_function_evidence_ref', 'scene_or_need_evidence_ref',
   'product_category_state', 'product_function_state', 'scene_or_need_state',
+  // P0（Simon 2026-10-08 决策③「加分档就可以了」）：素材分档＝人工判断结果，重新导入不得覆盖
+  'value_tier',
 ];
 
 // F4：人工分类字段族（有效值 + 来源归属 + 复核人 + 证据引用 + 状态）
@@ -56,13 +58,15 @@ export function planSchema() {
           { name: 'namespace', type: 'text', note: 'main | aid（aid 单列，永不合并且不参与合并唯一总数）' },
           { name: 'native_id', type: 'text', note: '字符串保存；>2^53 的 id 不经 Number()' },
           { name: 'branch', type: 'text' },
-          { name: 'canonical_url', type: 'url' },
-          { name: 'derived_permalink', type: 'url' },
+          { name: 'canonical_url', type: 'url', note: 'R11：只放**绝对**地址；非绝对时留空并由 *_recorded 原样保存' },
+          { name: 'canonical_url_recorded', type: 'text', note: 'R11：来源原样值（可能是相对路径/裸 ID），不伪造绝对地址' },
+          { name: 'derived_permalink', type: 'url', note: 'R11：同上；Baserow url 字段拒收裸 ID' },
+          { name: 'derived_permalink_recorded', type: 'text', note: 'R11：来源原样值（如 DddloSbTQoI / BV1jkYr6hEDF / 117292687955783）' },
           { name: 'author_id', type: 'text' },
           { name: 'author_display_name', type: 'text' },
           { name: 'author_follower_count', type: 'number' },
           { name: 'media_type', type: 'text' },
-          { name: 'duration_seconds', type: 'number' },
+          { name: 'duration_seconds', type: 'number', decimals: 6 },
           { name: 'publish_date_epoch_s', type: 'number' },
           { name: 'publish_date_label', type: 'text' },
           { name: 'language', type: 'text', note: '未知保持 unknown，不填 0' },
@@ -87,7 +91,7 @@ export function planSchema() {
           // ---- 人工字段（导入永不覆盖；证据变化时只标 stale）----
           { name: 'review_status', type: 'single_select', options: ['unreviewed', 'in_review', 'reviewed', 'rejected'], human: true },
           { name: 'review_reviewer', type: 'text', human: true },
-          { name: 'review_reviewed_at', type: 'date', human: true },
+          { name: 'review_reviewed_at', type: 'date', includeTime: true, human: true },
           { name: 'review_notes', type: 'long_text', human: true },
           { name: 'review_value_categories', type: 'text', human: true },
           { name: 'selected_reference', type: 'boolean', human: true },
@@ -106,7 +110,7 @@ export function planSchema() {
           { name: 'asset_link', type: 'link_row', linkTo: TABLE_ASSETS, note: 'F2：原生关联到 Assets' },
           { name: 'index', type: 'number' },
           { name: 't_label', type: 'text' },
-          { name: 'start_seconds', type: 'number' },
+          { name: 'start_seconds', type: 'number', decimals: 6 },
           { name: 'observed', type: 'long_text' },
           { name: 'onscreen_text', type: 'text' },
           { name: 'speech', type: 'long_text' },
@@ -140,7 +144,7 @@ export function planSchema() {
           { name: 'metric_caveat', type: 'text', note: '口径边界/不得升级的解释' },
           { name: 'comparable_across_platforms', type: 'boolean', note: '普查已明确跨平台可比性未建立 → 恒为 false' },
           { name: 'value_text', type: 'text', note: '原值（字符串）' },
-          { name: 'numeric_value', type: 'number' },
+          { name: 'numeric_value', type: 'number', decimals: 6 },
           { name: 'unit', type: 'text' },
           { name: 'observed_at_epoch_s', type: 'number' },
           { name: 'observation_basis', type: 'text' },
@@ -160,7 +164,7 @@ export function planSchema() {
           { name: 'entity_key', type: 'text' },
           { name: 'ratio_key', type: 'text' },
           { name: 'status', type: 'text' },
-          { name: 'value', type: 'number' },
+          { name: 'value', type: 'number', decimals: 6 },
           { name: 'unit', type: 'text' },
           { name: 'reason', type: 'text' },
           { name: 'attribution', type: 'text' },
@@ -179,7 +183,7 @@ export function planSchema() {
           { name: 'media_view_path', type: 'text', note: 'R5：本地点播入口相对路由 /viewer?asset=<asset_id>' },
           { name: 'media_view_url', type: 'url', note: 'R6：**绝对**点播链接（实际发布的 host:port + 该相对路由），可直接点击' },
           { name: 'media_service_state', type: 'single_select', options: ['published', 'not_published'], note: 'R6：观看服务是否已发布；未发布时不得伪装成可用链接' },
-          { name: 'media_seek_seconds', type: 'number', note: 'R5：首个片段的起始秒（非零即定位点；缺失为 null，不写 0 冒充）' },
+          { name: 'media_seek_seconds', type: 'number', decimals: 6, note: 'R5：首个片段的起始秒（非零即定位点；缺失为 null，不写 0 冒充）' },
           { name: 'cohort', type: 'text' },
           { name: 'local_path', type: 'text', note: '绝对路径（相对路径依赖 cwd，不作交付）' },
           { name: 'local_path_recorded', type: 'text', note: '来源记录中的原样路径' },
@@ -191,7 +195,7 @@ export function planSchema() {
           { name: 'sha256_match', type: 'boolean' },
           { name: 'bytes', type: 'number' },
           { name: 'actual_bytes', type: 'number' },
-          { name: 'duration_seconds', type: 'number' },
+          { name: 'duration_seconds', type: 'number', decimals: 6 },
           { name: 'resolution', type: 'text' },
           { name: 'contact_sheet', type: 'text' },
           { name: 'card_file', type: 'text' },
@@ -419,11 +423,24 @@ export function createHttpClient({ baseUrl, token, mgmtToken = null, fetchImpl =
   };
 }
 
+// R11：类型相同但**字段选项**不符时，必须按真实 API 修正，否则行写入会被 400 拒绝
+// （实测：number 默认 0 位小数拒收 6.8；date 默认不含时间拒收 ISO 时间戳）。
+function fieldOptionPatch(f, found) {
+  const patch = {};
+  if (f.type === 'number' && Number(found?.number_decimal_places ?? 0) < Number(f.decimals ?? 0)) {
+    patch.number_decimal_places = Number(f.decimals ?? 0);
+  }
+  if (f.type === 'date' && f.includeTime === true && found?.date_include_time !== true) {
+    patch.date_include_time = true;
+  }
+  return Object.keys(patch).length ? patch : null;
+}
+
 // F2：幂等的 schema + 视图落地。重复调用必须复用既有表/字段/视图，不得重复创建。
 export async function ensureSchemaAndViews(client, { schema = planSchema(), views = planViews(), databaseId = null, existingTables = null } = {}) {
   const log = {
     scope: { database_id: databaseId ? Number(databaseId) : null, listing: existingTables ? 'caller_supplied' : 'list_tables_in_database', auth: 'JWT' },
-    tables_created: [], tables_reused: [], primary_field_renamed: [], fields_created: [], fields_reused: [],
+    tables_created: [], tables_reused: [], primary_field_renamed: [], fields_created: [], fields_reused: [], fields_repaired: [],
     type_mismatches: [], views_created: [], views_reused: [], views_repaired: [],
     filters_created: 0, filters_reused: 0, sorts_created: 0, sorts_reused: 0,
     filter_value_encodings: [], scope_errors: [],
@@ -480,7 +497,18 @@ export async function ensureSchemaAndViews(client, { schema = planSchema(), view
     fieldMeta[t.name] = {};
     for (const f of t.fields) {
       const found = fByName.get(f.name);
-      if (found) { fieldIds[t.name][f.name] = found.id; fieldMeta[t.name][f.name] = found; log.fields_reused.push({ table: t.name, name: f.name, id: found.id, type: found.type }); if (found.type !== f.type && !f.primary) log.type_mismatches.push({ table: t.name, name: f.name, expected: f.type, actual: found.type }); continue; }
+      if (found) {
+        fieldIds[t.name][f.name] = found.id; fieldMeta[t.name][f.name] = found; log.fields_reused.push({ table: t.name, name: f.name, id: found.id, type: found.type });
+        if (found.type !== f.type && !f.primary) log.type_mismatches.push({ table: t.name, name: f.name, expected: f.type, actual: found.type });
+        // R11：既有字段的选项不足（小数位/是否含时间）按真实 API 补齐，而不是让后续写入持续 400。
+        const patch = fieldOptionPatch(f, found);
+        if (patch) {
+          const repaired = await client.updateField(found.id, patch);
+          fieldMeta[t.name][f.name] = { ...found, ...repaired };
+          log.fields_repaired.push({ table: t.name, name: f.name, id: found.id, patch });
+        }
+        continue;
+      }
       if (f.primary) {
         // Baserow 建表自带一个 primary 字段；把它改名为本表主键，而不是新建第二个 primary
         const currentPrimary = (existingFields ?? []).find((x) => x.primary);
@@ -495,6 +523,9 @@ export async function ensureSchemaAndViews(client, { schema = planSchema(), view
       const body = { name: f.name, type: f.type === 'link_row' ? 'link_row' : f.type };
       if (f.type === 'single_select') body.select_options = (f.options ?? []).map((o) => ({ value: o, color: 'light-blue' }));
       if (f.type === 'link_row') body.link_row_table_id = tableIds[f.linkTo];
+      // R11：数值小数位与日期是否含时间必须显式声明（Baserow 默认 0 位小数/仅日期）。
+      if (f.type === 'number' && f.decimals) body.number_decimal_places = Number(f.decimals);
+      if (f.type === 'date' && f.includeTime === true) body.date_include_time = true;
       const created = await client.createField(tableId, body);
       fieldIds[t.name][f.name] = created.id;
       // R4-F2b：过滤值编码需要选项 ID → 保留字段元数据（建字段响应可能不回 options，用请求体兜底）
@@ -606,6 +637,56 @@ export const LINK_FIELDS = {
   [TABLE_METRICS]: { video_link: TABLE_VIDEOS },
   [TABLE_RATIOS]: { video_link: TABLE_VIDEOS },
 };
+// R12/M3 第 6 批复核 R6-1 修复：**反向**关联字段（由子表写入后出现在父行上的 link_row）。
+// 这些字段在父行的写入意图里恒为空，实际值却由子行建立关系后填充 —— 属“顺序产物”，不是数据不符。
+// 实测字段名（本机 Baserow 库 661，2026-10-08 GET /api/database/fields/table/{id}/）：
+//   Videos: Segments / Metric observations / Ratios / Assets；Assets: Segments。
+// 注意：上一版只查 LINK_FIELDS（正向字段），对 Videos 为空集，等于**没有生效** → 原 run2 的 50 条假不符无法被它消除。
+export const REVERSE_LINK_FIELDS = {
+  [TABLE_VIDEOS]: {
+    Segments: TABLE_SEGMENTS,
+    'Metric observations': TABLE_METRICS,
+    Ratios: TABLE_RATIOS,
+    Assets: TABLE_ASSETS,
+  },
+  [TABLE_ASSETS]: { Segments: TABLE_SEGMENTS },
+};
+// 某张表上“全部 link_row 字段名”（正向 + 反向）——写后对账判定“顺序产物”时使用。
+export function linkFieldNames(table) {
+  return [...Object.keys(LINK_FIELDS[table] ?? {}), ...Object.keys(REVERSE_LINK_FIELDS[table] ?? {})];
+}
+// link_row 实际值的形状：`[{id,value,order}]`（行接口）或 `[id,...]`（导出/部分接口）。
+export function isLinkShaped(v) {
+  if (!Array.isArray(v) || v.length === 0) return false;
+  return v.every((x) => (x && typeof x === 'object' ? 'id' in x : Number.isInteger(x) || /^\d+$/.test(String(x))));
+}
+// 某张表作为**被引用方**时，用哪个字段与子行匹配：Videos 用 entity_key，Assets 用 asset_id。
+// （R12 第 7 批复核 R7-3：反向关系核对必须按此取键，否则同一视频下多个资产会互相串味。）
+export function parentRelationKeyField(parentTable) {
+  return parentTable === TABLE_VIDEOS ? 'entity_key' : parentTable === TABLE_ASSETS ? 'asset_id' : null;
+}
+// 反向关系核对：父行上某反向字段**应当**包含的子行行 ID（本轮已绑定者）。
+export function reverseRelationExpectedIds({ parentTable, parentRow, childTable, childRows = [], bindings = {}, childPrimaryKey }) {
+  const keyField = parentRelationKeyField(parentTable);
+  if (!keyField) return [];
+  const want = String(parentRow?.[keyField] ?? '');
+  if (!want) return [];
+  return childRows
+    .filter((c) => String(c?.[keyField] ?? '') === want)
+    .map((c) => bindings[childTable]?.[String(c[childPrimaryKey])])
+    .filter((x) => x != null).map(String).sort();
+}
+// 单条不符是否属于“意图为空、实际非空的 link 字段”这一顺序产物。
+// 只豁免这一种形状：意图有值却对不上、或非 link 字段不符，仍必须计为真实不符（不得掩盖错链/错值）。
+export function isIgnorableLinkOrderArtifact(mismatch, linkNames = []) {
+  const wanted = mismatch?.wanted;
+  const wantEmpty = wanted === null || wanted === undefined || (Array.isArray(wanted) && wanted.length === 0);
+  if (!wantEmpty) return false;
+  const actual = mismatch?.actual;
+  const actualNonEmpty = Array.isArray(actual) ? actual.length > 0 : (actual !== null && actual !== undefined && actual !== '');
+  if (!actualNonEmpty) return false;
+  return linkNames.includes(mismatch?.field) || isLinkShaped(actual);
+}
 
 // 内存后端：仅用于离线验证适配器语义。**不是** Baserow，不能作为 Baserow 验收证据。
 export function createMemoryBackend({ failOnInsert = null, failOnTable = null } = {}) {
@@ -695,8 +776,10 @@ export function encodeWritePayload(table, row, fieldMetaForTable = null) {
     }
     if (t === 'single_select') {
       if (v === undefined) continue;
-      const opt = (meta?.[k]?.select_options ?? []).find((o) => o.value === v || String(o.id) === String(v));
-      out[k] = opt ? String(opt.id) : v;
+      // R11 实测（Baserow 2.4.0 真实实例）：行写入的 single_select 收的是**选项值**，不是选项 ID。
+      // 发选项 ID（如 "3898"）会被拒：`The provided select option value '3898' is not a valid select option.`
+      // 视图过滤仍然需要选项 ID（见 encodeFilterValue），两者是不同编码，不得混用。
+      out[k] = v;
       continue;
     }
     if (v === undefined) continue;
@@ -756,9 +839,33 @@ export function createHttpBackend({ client, tableIds, fieldMeta = {}, pageSize =
 // ---------------------------------------------------------------- import
 // R6-STEP3：可选把**实际发布**的本地观看服务地址接进记录的可点击字段（绝对 URL），
 // 用户/测试都不必手工拼接相对路由；未发布时显式标 `not_published`，不产生坏链接。
+// R11：二进制浮点噪声（如 0.6110000000000001）不是数据精度。写入 Baserow `number` 字段前按 6 位小数收敛，
+// 与 planSchema 声明的 decimals=6 一致；只处理 number 字段中的有限数值，不动文本/整数/null。
+const NUMBER_FIELD_NAMES = (() => {
+  const map = {};
+  for (const t of planSchema().tables) map[t.name] = new Set(t.fields.filter((f) => f.type === 'number').map((f) => f.name));
+  return map;
+})();
+function roundFloatNoise(payload, decimals = 6) {
+  for (const [table, rows] of Object.entries(payload)) {
+    const numeric = NUMBER_FIELD_NAMES[table];
+    if (!numeric) continue;
+    for (const row of rows) {
+      for (const name of numeric) {
+        const v = row[name];
+        if (typeof v === 'number' && Number.isFinite(v)) row[name] = Number(v.toFixed(decimals));
+      }
+    }
+  }
+  return payload;
+}
+
 export function rowsOf(records, { mediaBaseUrl = null } = {}) {
   const viewUrl = (viewPath) => (mediaBaseUrl && viewPath ? absoluteViewUrl(mediaBaseUrl, viewPath) : null);
   const serviceState = mediaBaseUrl ? 'published' : 'not_published';
+  // R11：Baserow 的 url 字段只接受绝对地址；来源里的相对路径/裸 ID 原样存进 *_recorded 文本字段，
+  // 不拼接、不猜测平台域名（避免把“看似 URL”的推断写进证据）。
+  const absoluteOrNull = (v) => (typeof v === 'string' && /^https?:\/\//i.test(v) ? v : null);
   const videos = [], metrics = [], ratios = [], assets = [], segments = [];
   for (const r of records) {
     videos.push({
@@ -767,8 +874,10 @@ export function rowsOf(records, { mediaBaseUrl = null } = {}) {
       namespace: r.namespace,
       native_id: r.native_id,
       branch: r.branch,
-      canonical_url: r.identity.canonical_url,
-      derived_permalink: r.identity.derived_permalink,
+      canonical_url: absoluteOrNull(r.identity.canonical_url),
+      canonical_url_recorded: r.identity.canonical_url ?? null,
+      derived_permalink: absoluteOrNull(r.identity.derived_permalink),
+      derived_permalink_recorded: r.identity.derived_permalink ?? null,
       author_id: r.identity.author_id,
       author_display_name: r.identity.author_display_name,
       author_follower_count: r.identity.author_follower_count,
@@ -866,7 +975,7 @@ export function rowsOf(records, { mediaBaseUrl = null } = {}) {
       }
     }
   }
-  return { [TABLE_VIDEOS]: videos, [TABLE_METRICS]: metrics, [TABLE_RATIOS]: ratios, [TABLE_ASSETS]: assets, [TABLE_SEGMENTS]: segments };
+  return roundFloatNoise({ [TABLE_VIDEOS]: videos, [TABLE_METRICS]: metrics, [TABLE_RATIOS]: ratios, [TABLE_ASSETS]: assets, [TABLE_SEGMENTS]: segments });
 }
 
 // 计算「相对既有目标状态」的差异。人工字段永不进入更新集合。
@@ -919,6 +1028,17 @@ export function logicalEqual(a, b) {
   if (a === null || a === undefined) return b === null || b === undefined || b === '';
   if (b === null || b === undefined) return a === '';
   if (typeof a === 'object' || typeof b === 'object') return JSON.stringify(a) === JSON.stringify(b);
+  // R11：Baserow 的 number 字段（decimals>0）读回是**字符串**（如 "7.334000"），写入意图是数字 7.334。
+  // 直接字符串比较会永远不等 → 每次复导入都误判为“需要更新”。数值语义相同时视为相同；
+  // 仅当两侧都是有限数值时才走这条，文本与含非数字字符的字符串仍按字面比较。
+  if (typeof a === 'number' && typeof b === 'string') {
+    const n = Number(b);
+    return Number.isFinite(n) && Number.isFinite(a) && n === a;
+  }
+  if (typeof b === 'number' && typeof a === 'string') {
+    const n = Number(a);
+    return Number.isFinite(n) && Number.isFinite(b) && n === b;
+  }
   return String(a) === String(b);
 }
 
@@ -941,10 +1061,21 @@ export function detectDuplicateTargetKeys({ table, rows, source, receipt }) {
   const pk = TABLE_PRIMARY_KEY[table];
   const seen = new Map();
   const dups = [];
+  const emptyKeyRows = [];
   for (const r of rows ?? []) {
-    const k = String(r?.[pk]);
+    const k = String(r?.[pk] ?? '');
+    // R11 修复：Baserow 建表 API 会为每张新表自带**主键为空**的占位行，它们不主张任何身份，
+    // 因此不能算作“同一身份两行”。但必须**如实登记行 ID**，不得让目标状态看起来没有多余行。
+    if (k === '') { emptyKeyRows.push(r?.id ?? null); continue; }
     if (seen.has(k)) dups.push({ key: k, row_ids: [seen.get(k)?.id ?? null, r?.id ?? null] });
     else seen.set(k, r);
+  }
+  if (emptyKeyRows.length) {
+    receipt.empty_primary_key_rows = receipt.empty_primary_key_rows ?? [];
+    receipt.empty_primary_key_rows.push({
+      table, source, field: pk, row_count: emptyKeyRows.length, row_ids: emptyKeyRows.slice(0, 10),
+      note: '主键为空的占位行（Baserow 建表自带）：不参与重复判定，也不被导入当作目标行；本工具不自动删除。',
+    });
   }
   if (!dups.length) return [];
   receipt.target_duplicates.push({ table, source, unique_keys: seen.size, returned_rows: (rows ?? []).length, duplicate_count: dups.length, sample: dups.slice(0, 3) });
@@ -1106,7 +1237,11 @@ export async function importRecords({
         receipt.errors.push({ table, key, op: 'insert', error_code: 'insert_error_row_present_but_values_differ', error: String(e.message), mismatches: cmp.mismatches.slice(0, 8) });
         return { status: 'error', row_id: found.id ?? null };
       }
-      receipt.errors.push({ table, key, op: 'insert', error_code: 'insert_definitively_rejected', error: String(e.message) });
+      // R11：把服务端校验响应一并记入回执（`baserow_http_400` 单说状态码无法复盘；响应体不含凭据）。
+      const rejection = e?.body !== undefined && e?.body !== null
+        ? { error: String(e.message), http_status: e.status ?? null, response_body: JSON.stringify(e.body).slice(0, 400) }
+        : { error: String(e.message), http_status: e.status ?? null };
+      receipt.errors.push({ table, key, op: 'insert', error_code: 'insert_definitively_rejected', ...rejection });
       return { status: 'error', row_id: null };
     }
   };
@@ -1153,10 +1288,12 @@ export async function importRecords({
   }
 
   // 3) 其余四张表（含 Segments）按主键 upsert；**父行未写入 → 子行不写并带原因**，不得静默产生孤儿成功
+  const linkAbsentByTable = {};
   for (const table of ALL_TABLES.filter((t) => t !== TABLE_VIDEOS)) {
     const pk = TABLE_PRIMARY_KEY[table];
     const byKey = new Map(existing[table].map((r) => [String(r[pk]), r]));
     bindings[table] = {};
+    let linkAbsentInSourceTotal = 0;
     for (const row of payload[table]) {
       const key = String(row[pk]);
       // R6-STEP1：自身键在目标里歧义 → 阻断该子行
@@ -1168,7 +1305,11 @@ export async function importRecords({
         for (const [fieldName, targetTable] of Object.entries(linkSpec)) {
           const targetKey = targetTable === TABLE_VIDEOS ? row.entity_key
             : targetTable === TABLE_ASSETS ? row.asset_id : null;
-          if (!targetKey) continue;
+          // R12 第 8 批复核 R8-3 修复：必须区分“源里本来就没有该父键”（不建立关联，合法）
+          // 与“源里给了空字符串”（数据异常）——后者旧实现直接 `continue`，会把子行**无声写成孤儿**，
+          // 写后对账又因父键为空跳过关系核对 → 最终 ok=true。现在空父键一律阻断该子行并报错。
+          if (targetKey === null || targetKey === undefined) { linkAbsentInSourceTotal += 1; continue; }
+          if (String(targetKey).trim() === '') { parentFailure = { fieldName, targetTable, targetKey, empty: true }; break; }
           // R6-STEP1：父/目标键歧义 → 不得挑一个赢家去关联，阻断该子行
           if (isAmbiguous(targetTable, targetKey)) { parentFailure = { fieldName, targetTable, targetKey, ambiguous: true }; break; }
           const targetId = bindings[targetTable]?.[targetKey];
@@ -1187,9 +1328,11 @@ export async function importRecords({
         const parentFailed = failedRowIds.has(`${parentFailure.targetTable}|${parentFailure.targetKey}`);
         receipt.errors.push({
           table, key, op: 'skip',
-          error_code: parentFailed ? 'parent_row_not_written' : 'link_target_not_bound',
+          error_code: parentFailure.empty ? 'link_parent_key_empty' : (parentFailed ? 'parent_row_not_written' : 'link_target_not_bound'),
           parent_table: parentFailure.targetTable, parent_key: parentFailure.targetKey,
-          note: '父行失败或关联目标未绑定 → 不写该子行（避免无关联的“孤儿成功”）。',
+          note: parentFailure.empty
+            ? '子行引用的父键是**空值** → 不写该子行（否则会形成“孤儿成功”且关系核对无从进行）。'
+            : '父行失败或关联目标未绑定 → 不写该子行（避免无关联的“孤儿成功”）。',
         });
         failedRowIds.add(`${table}|${key}`);
         bump(table, 'skipped');
@@ -1219,6 +1362,7 @@ export async function importRecords({
       if (res.row_id == null) failedRowIds.add(`${table}|${key}`);
       if (!prev) byKey.set(key, { ...next, id: res.row_id });
     }
+    linkAbsentByTable[table] = linkAbsentInSourceTotal;
   }
 
   receipt.bindings.count = Object.values(bindings).reduce((a, m) => a + Object.keys(m).length, 0);
@@ -1231,6 +1375,9 @@ export async function importRecords({
   //    期望值取自 `expectedFinal`（写入策略的真实产物），因此不再整族豁免 humanFields。
   //    同时在**收进 Map 之前**检测目标重复主键（含仅最终读回才出现的重复），不静默挑赢家。
   const post = {};
+  const relationChecksSkippedTotal = {};
+  const reverseChecksAbsentTotal = {};
+  const reverseChecksPerformedTotal = {};
   for (const t of ALL_TABLES) {
     const pk = TABLE_PRIMARY_KEY[t];
     const rows = await backend.listAllRows(t);
@@ -1244,18 +1391,68 @@ export async function importRecords({
       if (!found) { missing.push(key); continue; }
       verified.push(key);
       const expected = expectedFinal[t].get(key) ?? planned;
+      // R12/M3 第 6 批复核 R6-1（第二轮修复）：把**自动反向字段**与**主动写入字段**彻底分开。
+      //  · 反向字段（REVERSE_LINK_FIELDS）= 子表建立关系后由 Baserow 在父行上投影出来的集合：
+      //    它在本轮开始时的快照与本轮结束时的状态**本来就会不同**（子行正是本轮写进去的），
+      //    因此**不做逐字段比较**，改为下面按**目标身份**核对关系集合（含 id 级比对）。
+      //    —— 这是 R6-1 的核心：旧的“意图为空才豁免”规则既覆盖不到 Videos，也挡不住“意图非空但会增长”的情形
+      //       （受控中断排练实测：Metric observations 由 75 涨到 300 → 仍被误判成不符、ok=false）。
+      //  · 正向字段（LINK_FIELDS）仍做比较，仅“意图为空、实际非空”的顺序产物豁免。
+      const reverseNames = Object.keys(REVERSE_LINK_FIELDS[t] ?? {});
       const cmp = compareIntent({ intent: expected, row: found });
-      if (!cmp.ok) field_mismatches.push({ key, mismatches: cmp.mismatches.slice(0, 8) });
+      const linkNames = linkFieldNames(t);
+      const realMismatches = cmp.mismatches
+        .filter((m) => !reverseNames.includes(m.field))
+        .filter((m) => !isIgnorableLinkOrderArtifact(m, linkNames));
+      const reverseExcluded = cmp.mismatches.length - realMismatches.length;
+      if (realMismatches.length) field_mismatches.push({ key, mismatches: realMismatches.slice(0, 8), link_order_artifacts_ignored: reverseExcluded });
+      let relationChecksSkipped = 0;
+      let reverseChecksAbsent = 0;
+      let reverseChecksPerformed = 0;
       for (const [fieldName, targetTable] of Object.entries(LINK_FIELDS[t] ?? {})) {
         const targetKey = targetTable === TABLE_VIDEOS ? planned.entity_key
           : targetTable === TABLE_ASSETS ? planned.asset_id : null;
         const expectedId = targetKey ? bindings[targetTable]?.[targetKey] : null;
-        if (!expectedId) continue;
+        // 目标行未绑定 → 关系无从核对。父行未写入时子行本就不会写（见上方“父行未写入 → 子行不写”），
+        // 因此这里如实**计数**并在回执里暴露，而不是静默跳过（第 6 批复核 R6-1 指出的可掩盖点）。
+        if (!expectedId) { relationChecksSkipped += 1; continue; }
         const actual = (found[fieldName] ?? []).map(String);
         if (!actual.includes(String(expectedId))) relation_mismatches.push({ key, field: fieldName, expected_id: expectedId, actual });
       }
+      // 反向关系核对：父行的反向集合必须**恰好**等于本轮已绑定子行的 id 集合（按目标身份核对，不是模糊比较）。
+      for (const [fieldName, childTable] of Object.entries(REVERSE_LINK_FIELDS[t] ?? {})) {
+        // 反向字段**不在读回结果里**时无从核对（如内存替身、或目标视图未返回该字段）：
+        // 如实计入 reverse_checks_skipped_field_absent，而不是静默当成通过。
+        if (!(fieldName in found)) { reverseChecksAbsent += 1; continue; }
+        const childPk = TABLE_PRIMARY_KEY[childTable];
+        // R12 第 7 批复核 R7-3 修复：关联键必须**按父表**取——Videos 用 entity_key，
+        // Assets 用 asset_id。旧写法一律用 entity_key，会把同一视频下**其它资产**的片段
+        // 也算进当前资产的反向集合 → 合法关系被误判（当前语料每条至多一个资产，故未触发）。
+        const expectedIds = reverseRelationExpectedIds({
+          parentTable: t, parentRow: planned, childTable, childRows: payload[childTable], bindings, childPrimaryKey: childPk,
+        });
+        const actualIds = (found[fieldName] ?? []).map((x) => String(x && typeof x === 'object' ? x.id : x)).sort();
+        reverseChecksPerformed += 1;
+        if (JSON.stringify(expectedIds) !== JSON.stringify(actualIds)) {
+          relation_mismatches.push({ key, field: fieldName, direction: 'reverse', parent_key_field: parentRelationKeyField(t), expected_ids: expectedIds, actual_ids: actualIds });
+        }
+      }
+      if (relationChecksSkipped) relationChecksSkippedTotal[t] = (relationChecksSkippedTotal[t] ?? 0) + relationChecksSkipped;
+      reverseChecksAbsentTotal[t] = (reverseChecksAbsentTotal[t] ?? 0) + reverseChecksAbsent;
+      reverseChecksPerformedTotal[t] = (reverseChecksPerformedTotal[t] ?? 0) + reverseChecksPerformed;
     }
-    post[t] = { planned: payload[t].length, verified: verified.length, missing, field_mismatches, relation_mismatches, read_back_rows: rows.length };
+    post[t] = {
+      planned: payload[t].length, verified: verified.length, missing, field_mismatches, relation_mismatches,
+      relation_checks_skipped: relationChecksSkippedTotal[t] ?? 0,
+      // 反向核对的覆盖率（R12 第 7 批复核）：ok=true 本身不证明反向检查都跑过，必须看这两个计数
+      reverse_checks_performed: reverseChecksPerformedTotal[t] ?? 0,
+      reverse_checks_skipped_field_absent: reverseChecksAbsentTotal[t] ?? 0,
+      // 源里本就没有该父键的行数（合法：不建立关联）；空字符串父键会被阻断并计入 errors（R8-3）
+      link_absent_in_source: linkAbsentByTable[t] ?? 0,
+      link_field_names_checked: linkFieldNames(t),
+      reverse_link_fields_excluded_from_field_compare: Object.keys(REVERSE_LINK_FIELDS[t] ?? {}),
+      read_back_rows: rows.length,
+    };
   }
   receipt.post_write_reconciliation = post;
   receipt.ok = receipt.errors.length === 0

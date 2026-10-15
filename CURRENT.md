@@ -1,31 +1,35 @@
-# Phonecase Harness entry status
+# CURRENT — 产品素材研究库（本机面板）第一阶段
 
-Updated 2026-10-07（Asia/Shanghai）。本页是该工作区的**唯一当前导航卡**，只做导航：指向监督目标卡、现行工程单、本轮交付与唯一检查点，**不承载任何量值/字段/预算副本**。
+本卡是**本任务自己的**唯一导航卡，只做导航：指向监督目标卡、现行工程单、本轮交付与唯一检查点，**不承载任何量值/字段/预算副本**。
 
-上一版（R7 导航）逐字节归档：`outputs/product-material-library-phase1-20261006/CURRENT-history-20261007-c0319fae3f49.md`，SHA256 `c0319fae3f49e18cd85010618e47448117fbbd77dbea16bc4c6e94367e6b827d`，3649 字节。
+- 建立时间：2026-10-10（Asia/Shanghai）。按 Simon 当日指令：「换成这个新卡吧，这个是独立新的任务，不要带着老的历史进来了」——**旧卡（含其它任务的追加块与历史归档行）不带入本卡**；旧卡整卡逐字节归档在 `outputs/product-material-library-phase1-20261006/CURRENT-history-20261010-c1e5aa7f.md`（5821 B / `c1e5aa7f…ab54`），需要追溯时再读它。
 
-## 唯一入口（导航）
+## 唯一入口
 
 - 任务标题：`1006 | 功能 | 产品素材研究库第一阶段`。
-- 监督目标卡（唯一动态监督入口；R 对执行端只读）：`R/outputs/phonecase-xmind-closeout-20260917/产品素材研究库-监督交接与当前目标卡-20261006.md`，章节「5.13 已批准完整下一步方案（R8）」；复审记录见 5.2/5.4/5.6/5.8/5.10/5.12。
-- 现行工程单：**R8** `R/outputs/phonecase-xmind-closeout-20260917/产品素材研究库-第一阶段-Harness工程单-20261007-R8.md`（R1–R7 按原路径原文冻结）。同目录 `产品素材研究库-R8派单前-history-20261007.md` 是**历史件**，不是工程单。
-- 唯一检查点（**唯一现场状态源**）：`outputs/product-material-library-phase1-20261006/CHECKPOINT.md`（R8 轮见 §20）。量值、指纹、验收视图与三项交付质量观察**只在检查点与报告中**，本卡不复制。
-- 本轮报告：`harness-reports/1006-功能-产品素材研究库第一阶段-r7.md`（r1–r6 冻结不改）。
-- 代码根：`tools/material-library/`（`cli.mjs` 含 `query`/`edit`/`export`/`restore`/`journey`/`media` 等命令）；测试：`tools/material-library/tests/`（`phase1.test.mjs`、`fixture-root.mjs`、`baserow-double.mjs` 替身、`r8-sequence.mjs` 顺序编排）；文档：`docs/product-material-library/`；输出根：`outputs/product-material-library-phase1-20261006/`。
-- 环境前提包：`environment-plan.md`（`material-library-R7-env-v1`；旧版归档 `environment-plan-history-{ff28bc0a8264,f382e84f5392,ee42def786b7,68dff659eac6}.md`）。
-- 代表输入清单：`representative-sample-r5.json`；媒体发布状态：`media/media-publication.json`（仅 `--serve` 期间为 published；未指定发布选项 ≠ 撤销既有链接）。
-- R8 顺序证据：`evidence/r8-sequence.json`（同一持久隔离目标上 8 步真实 CLI）、`evidence/r8-adoption-check.json`、`evidence/r8-session-events.json`、`evidence/r8-r6-recovery-scan.json`。
+- 现行工程单（唯一授权来源，只读）：`R/outputs/phonecase-xmind-closeout-20260917/产品素材研究库-素材面板-Harness工程单-20261009-R13.md`（修订号 **MATERIAL-PANEL-M1-M5-R13**）。
+- 监督目标卡（唯一动态监督入口；R 对执行端只读）：`R/outputs/phonecase-xmind-closeout-20260917/产品素材研究库-监督交接与当前目标卡-20261006.md`。
+- 唯一检查点（**唯一现场状态源**）：`outputs/product-material-library-phase1-20261006/CHECKPOINT.md`（本阶段见 **§24.68–§24.103**；§24.103 起是收口清点与监督验收记录）。量值、指纹、验收视图与三项交付质量观察**只在检查点与报告中**。
+- 本轮交付报告：`harness-reports/1006-功能-产品素材研究库第一阶段-r14.md`（覆盖 M1–M5 整包）。历史报告 r1–r13 按"字节冻结"保留、只作追溯，**引用状态一律以 r14 与检查点为准**。
+- 机械门回执：`outputs/product-material-library-phase1-20261006/evidence/gate-r14-final.json`（exec-verify v0.1.18）。
 
-## 边界（指针，正文以工程单/监督卡为准）
+## 本地实例与起停
 
-- 活动根：W=`D:/Codex-local/harness-workspaces/Phonecase`；R=`C:/Users/ahjxs/Documents/Codex/2026-08-24/new-chat/outputs/claude-to-codex-migration`（执行端只读）。`D:/Codex-local/phonecase` 仍是冻结只读历史。
-- **Git**：W 是 Git 仓库（`main`、**0 提交**、8 项未跟踪）。`init`＋`.gitignore` 已由 Simon 批准**保留**（General 会话 seq1048 / seq1687），**不回退**；`stage`/`commit`/`push` **仍各自待批**。
-- 本阶段新增 provider（TikHub/AI/媒体）请求 = 0；旧任务预算不迁入、不重置；共享账本 `tools/mcp-usage-ledger.md` 无写授权。
-- 八平台普查保持**已验收/已关闭**：不重开、不改冻结工件、不重试 48 未知、不释放预占。配音保持 PAUSED_UNFINISHED。
-- R8 未授权：主机安装/提权、镜像下载·传输·导入、共享配置/网络、凭据创建、Git stage/commit/push、云与调度；**也不得绕过报告写拒绝**（不得用 patch 脚本/路径拆写/换传输/关钩子）。
-- 正式交回后流程：Codex 独立复审 → 完整下一步方案 → Simon 确认 → 派单；执行端不自行开始下一单。
+- **面板（唯一入口）**：`node tools/material-library/panel-sqlite.mjs --serve --port 8792` → `http://127.0.0.1:8792`（读**本机单文件 SQLite**，无外部凭据，仅监听回环）。
+- 只读媒体服务：`http://127.0.0.1:8791`（仅回环）。
+- **Baserow 已转为只读归档**，不再是运行依赖、无需在 8080 起容器；如需重放导入：`outputs/product-material-library-phase1-20261006/r12/n1-migrate-to-sqlite.mjs --baserow-archive <store/archive/baserow-export-*.json>`。
+- 已归档、不再作为入口：`tools/material-library/panel.mjs`（Baserow 实时读取版）。
+- 操作说明：`docs/product-material-library/README.md` §8.6（面板与写入口径）／§8.8（拍摄计划 8 步操作 + 三段覆盖限度）。
+
+## 状态与边界
+
+- **里程碑**：M1–M5 均已按工程单完成，各有只读独立复核 PASS（M4 第二十三轮 `FINDINGS=0`；M5 第二十六轮判 MP-10／MP-11、第二十七轮判 MP-12 且 `FINDINGS=0`）。
+- **整包监督结论：已接受**——第六轮监督验收 `SUPERVISION VERDICT: ACCEPT（FINDINGS=0）`；第一至第五轮的 REJECT 与逐条修复见检查点 §24.103.1–§24.103.10。**机械门 `verdict=PASS / exit 0`**（`envelope-scope` 10/10，回执 `evidence/gate-r14-final.json`）。
+- **维护方待办（不阻断接受）**：① 把工作区根 `CURRENT.md` 单文件补入工程单 `authorized_roots`，完成后删除报告 §8.8 的临时报告侧信封并复跑留证；② 明确"门禁拒写时"的合法修复入口与责任人（执行端在此之前不自行绕过）。
+- **未做且不在本单授权内**：新增采集、新凭据/provider、1688、日常调度/自启、云/发布/公开暴露、代理/防火墙/共享检查器改动、产品/版本迁移、破坏性重置或删卷、新 stage/commit/push/部署。
+- Git：`main`，HEAD `0a3f3c68cd1b5d45f53d38d37a10f7872e6a0bc0`；本阶段未触碰 Git，改动全部保留为未提交状态。
 
 ## 本卡维护
 
-- 由执行端按既有安全文档写入方式更新：上一版逐字节归档到任务输出根后原位替换（R8 `additional_path_semantics`）。
-- 旧盘点的卡片守卫脚本 `logs/v526-check-current-card.mjs` 面向旧卡格式，本卡**不**改造它、也不以它校验本卡。
+- 只有本任务（产品素材研究库第一阶段）的当前状态写在本卡；其它任务不追加到本卡。
+- 更新方式：先把上一版逐字节归档到本任务输出根 `outputs/product-material-library-phase1-20261006/`（文件名 `CURRENT-history-<日期>-<sha8>.md`），再原位替换。

@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>产品素材研究库 · 本地面板</title>
+  <link rel="stylesheet" href="/app.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">产品素材研究库 <span class="tag-live">实时 · 可改人工字段</span></div>
+    <div id="summary" class="summary">加载中…</div>
+    <div class="top-right">
+      <button id="refresh" type="button" title="从自研本地库重新读取">刷新数据</button>
+    </div>
+  </header>
+
+  <!-- 全局提示条：读取/保存失败即使在详情未渲染时也必须可见（R12 复核修复） -->
+  <div id="flash" class="flash" style="display:none"></div>
+
+  <main class="wrap">
+    <!-- 左侧分区导航：讲业务分类，不讲表名 -->
+    <nav id="sidebar" class="side">
+      <div class="grp">工作区</div>
+      <a id="nav-lib" data-nav="list">素材库 <span class="n" id="nav-lib-n">—</span></a>
+      <a id="nav-library" data-nav="library">素材中心 <span class="n" id="nav-library-n">—</span></a>
+      <a id="nav-structure" data-nav="structure">结构中心 <span class="n" id="nav-structure-n">—</span></a>
+      <a id="nav-plan" data-nav="plan">拍摄计划 <span class="n" id="nav-plan-n">—</span></a>
+      <a id="nav-analysis" data-nav="analysis">存量分析 <span class="n" id="nav-analysis-n">—</span></a>
+      <!-- ★ 2026-10-13（Simon：「前台面板只看 有价值的」）：**缺口入口下线**——缺口是"采集不到来源/信息量过低"的记录，
+           不属于有价值范围，前台不再展示（视图节点仍在 DOM 里、默认隐藏，需要时可用 ?scope=all 或临时取消隐藏找回）。 -->
+      <a id="nav-gaps" data-nav="gaps" hidden style="display:none">缺口 <span class="n" id="nav-gaps-n">—</span></a>
+      <div class="grp">按状态</div>
+      <div id="nav-status"></div>
+      <!-- ★ 2026-10-13（Simon「可以 按你的建议」）：AI 标注进度单列一行，避免与上面的"待人工复核"（人工队列）混淆。
+           数字由 /api/summary 的 ai_scope 现算（跟着当前作用域走，默认＝有价值 580）。 -->
+      <div id="nav-ai"></div>
+      <div class="grp">按平台</div>
+      <div id="nav-platform"></div>
+    </nav>
+
+    <div class="main">
+      <!-- ═══ 列表态 ═══ -->
+      <section id="view-list">
+        <div class="filters">
+          <input id="f-keyword" type="search" placeholder="搜索标题 / 账号 / 素材编号" />
+          <select id="f-platform"><option value="">全部平台</option></select>
+          <select id="f-review">
+            <option value="">全部状态</option>
+            <option value="unreviewed">待人工复核</option>
+            <option value="in_review">复核中</option>
+            <option value="reviewed">通过</option>
+            <option value="rejected">排除</option>
+          </select>
+          <select id="f-sort" title="默认＝行业优先级（分档→有本地视频→播放量）">
+            <option value="priority">排序：行业优先级</option>
+            <option value="publish">排序：发布时间（新→旧）</option>
+            <option value="play">排序：播放量（高→低）</option>
+          </select>
+          <button id="more-btn" type="button" class="ghost">更多筛选 ▾</button>
+          <span class="spacer"></span>
+          <button id="f-reset" type="button">重置</button>
+        </div>
+        <div id="more" class="more">
+          <select id="f-source">
+            <option value="">来源：全部</option>
+            <option value="observed">来源正常</option>
+            <option value="source_unavailable">采集不到来源</option>
+            <option value="unknown">来源待确认</option>
+          </select>
+          <select id="f-tier">
+            <option value="">分档：全部</option>
+            <option value="T1 有本地视频">T1 有本地视频</option>
+            <option value="T2 证据充分">T2 证据充分</option>
+            <option value="T3 标准证据">T3 标准证据</option>
+            <option value="T4 低信息量">T4 低信息量</option>
+          </select>
+          <!-- R-9 修复：标签筛选（选项与计数由 /api/facets 的 by_tag 生成；选择后走服务端查询） -->
+          <select id="f-tag"><option value="">标签：全部</option></select>
+          <label class="chk">发布日期从 <input id="f-date-from" type="date" /></label>
+          <label class="chk">到 <input id="f-date-to" type="date" /></label>
+          <label class="chk"><input id="f-date-unknown" type="checkbox" /> 日期未知</label>
+          <label class="chk"><input id="f-media" type="checkbox" /> 只看有本地视频</label>
+          <label class="chk"><input id="f-segments" type="checkbox" /> 只看有片段</label>
+          <label class="chk"><input id="f-note" type="checkbox" /> 只看有备注</label>
+        </div>
+        <div id="chips" class="chips"></div>
+        <div id="list-meta" class="list-meta">读取中…</div>
+        <div style="padding:0 12px 8px"><button id="load-more" type="button" class="btn hidden">加载更多</button></div>
+        <div id="scope-explain" class="scope-explain"></div>
+        <div id="list" class="cards"></div>
+      </section>
+
+      <!-- ═══ 详情态（整页，与列表同一页两态） ═══ -->
+      <section id="view-detail" class="hidden">
+        <div class="backline">
+          <button id="back-to-list" type="button" class="btn">← 返回列表</button>
+          <span id="detail-crumb" class="crumb"></span>
+        </div>
+        <div id="detail" class="detail"><div class="empty">选择一条素材</div></div>
+      </section>
+
+      <!-- ═══ M3 素材中心（九个入口；单位与空状态都写在界面上） ═══ -->
+      <section id="view-library" class="hidden">
+        <div class="backline">
+          <button id="back-from-library" type="button" class="btn">← 返回列表</button>
+          <span class="crumb">素材中心 · 九个入口（按复用用途）</span>
+        </div>
+        <div id="library-note" class="tl-note"></div>
+        <div id="library-entries" class="lib-entries"></div>
+        <div id="library-items" class="lib-items"></div>
+      </section>
+
+      <!-- ═══ M3 结构中心（按已批准五段职能） ═══ -->
+      <section id="view-structure" class="hidden">
+        <div class="backline">
+          <button id="back-from-structure" type="button" class="btn">← 返回列表</button>
+          <span class="crumb">结构中心 · 按已批准五段职能（HOOK／痛点／场景／证据／CTA）</span>
+        </div>
+        <div id="structure-note" class="tl-note"></div>
+        <div id="structure-body"></div>
+      </section>
+
+      <!-- ═══ M4 拍摄计划（MP-08／MP-09）：从产品/需求出发建计划、逐节点选真实参考、如实记缺口 ═══ -->
+      <section id="view-plan" class="hidden">
+        <div class="backline">
+          <button id="back-from-plan" type="button" class="btn">← 返回列表</button>
+          <span class="crumb">拍摄计划 · 从产品或需求出发，按已批准五段结构逐节点选参考</span>
+        </div>
+        <div class="tl-note">创作建议（想表达什么／拟口播／拟拍摄画面）由人工新写，与来源事实分开放；参考片段只指向真实片段，
+          <b>没有素材的格子如实记为缺口</b>，不会被显示成已有素材。</div>
+        <div id="plan-list" class="lib-items"></div>
+        <div id="plan-editor" class="lib-items"></div>
+      </section>
+
+      <!-- ═══ 存量分析（①指标层趋势 + ②来源链接存活探测；数据来自只读回执） ═══ -->
+      <section id="view-analysis" class="hidden">
+        <div class="backline">
+          <button id="back-from-analysis" type="button" class="btn">← 返回列表</button>
+          <span class="crumb">存量分析 · 1,934 条可浏览记录的指标趋势与来源链接存活情况</span>
+        </div>
+        <div class="tl-note">本页只显示**已跑过的只读分析回执**：①趋势/对标来自本机库，②链接存活来自**只读探测**（HEAD，未下载任何内容）。
+          数字旁都标了分母与缺失率；未跑过就显示"未运行"，不用 0 代替。</div>
+        <div id="analysis-body"></div>
+      </section>
+
+      <!-- ═══ 缺口分区（登记，不入素材库） ═══ -->
+      <section id="view-gaps" class="hidden">
+        <div class="backline">
+          <button id="back-from-gaps" type="button" class="btn">← 返回列表</button>
+          <span class="crumb">缺口（只有身份、采集不到来源或信息量过低；不进素材列表）</span>
+        </div>
+        <div id="gaps-content" class="detail"><div class="empty">读取中…</div></div>
+      </section>
+    </div>
+  </main>
+
+  <footer class="foot">
+    数据由本机面板服务<b>实时从自研本地库（单文件 SQLite）读取</b>；本面板<b>不使用 Baserow 凭据</b>，浏览器不含任何令牌。复核状态、复核人、备注、人工分类与分档可在本页直接修改，
+    保存后服务端会<b>重新读取确认</b>再回显。来源派生字段（采集所得）本页<b>只读</b>，防止人工值被覆盖。每次编辑写入库内 <code>edits</code> 审计表（服务端 <code>/api/edits</code> 可查）。Baserow 已转为只读归档。
+  </footer>
+
+  <div id="batchbar" class="batchbar hidden">
+    <span>已选 <b id="batch-n">0</b> 条</span>
+    <button type="button" data-batch="reviewed">通过</button>
+    <button type="button" data-batch="rejected">排除</button>
+    <button type="button" data-batch="in_review">复核中</button>
+    <span class="spacer"></span>
+    <button type="button" id="batch-clear">清空选择</button>
+    <span class="kbd">J/K 上下 · Enter 打开 · 1 通过 · 2 排除 · 3 复核中 · Esc 返回</span>
+  </div>
+  <div id="batch-failures" class="batch-failures hidden"></div>
+  <script src="/app.js"></script>
+</body>
+</html>

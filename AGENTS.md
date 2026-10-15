@@ -18,7 +18,15 @@ The exact approved order supplies this package's outcome, acceptance, paths, all
 
 Follow this workspace's CURRENT navigation to the assigned task's existing sole checkpoint/handoff acceptance section, and retain its exact absolute path/section for startup and compaction recovery. Keep observations there and in the normal report, not in navigation, sibling tasks or imported history. Generated CURRENT files only point there; do not change their generator or a supervisor-owned card. File existence is not loading evidence.
 
-At formal handback, Codex reviews and proposes the complete next plan; Simon confirms before the next order or same-version continuation. This is separate from autonomous work inside the current package. No Codex-side edits or runtime/tool assumptions are authorized by this entry.
+At each business milestone, the designated independent reviewer (currently the read-only subagent_codex) performs acceptance review. After an evidence-backed PASS and closure of acceptance-blocking findings, continue the next milestone already covered by the approved plan and valid authority, without a fresh order or routine confirmation. Changed business criteria or authority still require Simon's decision. Preserve separately reserved gates. Ordinary work and repairs inside the milestone continue autonomously. No Codex-side edits or runtime/tool assumptions are authorized by this entry.
+
+## 本地已有凭证与调用方式（直接可用）
+
+本机凭据已配好、由 `启动-Harness.cmd` 注入；**不要再因为"以为没配"向 Simon 索要密钥**。唯一清单（名称/用途/调用方式，不含密钥值）：`D:/Codex-local/harness-workspaces/tools/CREDENTIALS.md`。
+
+- 已注册的 MCP 工具按 `mcp__*` 前缀直接调用（Harness 侧是 `tikhub`，不是 Codex 侧的 `tikhib`）；缺工具通常是没用启动器启动，而不是密钥没配。
+- 批量调 REST 用 `D:/Codex-local/harness-workspaces/tools/CredCall.ps1`；只读盘点用 `CredHelper.ps1` 的 `Get-CredInventory`（只报名称/可读性/长度，不打印值）。
+- 读取密钥值、改共享配置、付费调用仍需该任务单独授权；本小节不授予这些动作。
 
 ## Integration routes
 
