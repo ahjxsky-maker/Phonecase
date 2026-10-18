@@ -1,6 +1,12 @@
 # Phonecase independent-store Harness entry
 
-Updated 2026-10-05. This is the active session/development root for the US phone-case independent-store project, not the phonecase-daily selection task in a Nezha child worktree. The dispatch determines the project, paths, phase and authority; similar names do not transfer business rules, budgets or state.
+Updated 2026-10-18. This is the active session/development root for the US phone-case independent-store project, not the phonecase-daily selection task in a Nezha child worktree. The dispatch determines the project, paths, phase and authority; similar names do not transfer business rules, budgets or state.
+
+**新会话先读这里 →** `website/LESSONS-独立站执行经验与坑.md`（2026-10-18 整理的**可复用做法 + 已踩过的坑清单**：判据要测线上件、后台无媒体替换入口只能同 handle 重建、CSV 图片列会整体替换图库、集合选择器只点不打字、数字必须脚本化、复核与记账口径等）。它是**方法与坑**（相对静态）；**动态状态**仍以 `website/CURRENT.md` 为准，两者配合读，避免重复犯错。
+
+**做图/写文案/发社媒前再读 →** `website/BRAND-品牌档案.md`（2026-10-18 建档：标志 `HUSK | FORM` 墨色/反白 SVG 与线上同哈希校验、**官方 tagline `Everyday, in good form.`**、首页三层话术原句、字体 Archivo/Assistant、色板 #3A3E44＋#F7F5F1＋#C9BBA0、6 个分类 handle 与款数、商品内容与价格规则、待定项）。
+
+**续做素材面板 / 素材库 / MP-10 完整链 →** 先读 `docs/product-material-library/经验与坑-云端存储与素材面板-20261014.md` 的 **§12–§20**（2026-10-16/18 增补：资格判定 `qualificationOf()`+`pickAsset()` 与同源媒体路由、播放器定位守卫与竞态、**复核回执怎么写才不再被打回**、报告/机械门的四个新坑、Git 交付与凭据真相、Harness 工具层坑、**共享复核台账的坑（§19）**、新会话最小启动包（§18））。任务动态状态看 `outputs/product-material-library-phase1-20261006/CHECKPOINT.md`（§24.295 起）与收尾报告 `harness-reports/1006-功能-产品素材研究库第一阶段-r16.md`。
 
 ## Scope and history
 
